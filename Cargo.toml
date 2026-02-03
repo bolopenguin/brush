@@ -22,6 +22,7 @@ members = [
     "crates/lpips",
     "crates/lpips-convert",
     "crates/rrfd",
+    "crates/underfolder-to-nerf",
     "examples/train-2d",
 ]
 default-members = ["crates/brush-app"]
@@ -54,7 +55,7 @@ tracing = "0.1.41"
 tracing-tracy = "0.11.3"
 tracing-subscriber = "0.3.19"
 
-winapi = { version = "0.3", features = ["wincon"] }
+winapi = "0.3"
 
 tokio = { version = "1.42.0", default-features = false }
 tokio_with_wasm = "0.8.2"

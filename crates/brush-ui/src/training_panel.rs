@@ -244,7 +244,9 @@ impl AppPane for TrainingPanel {
                 }
             }
 
-            if process.is_training() {
+            if let Some(slot) = process.current_splats()
+                && process.is_training()
+            {
                 // Right-align export button
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Make export button more prominent when training is complete
@@ -276,10 +278,9 @@ impl AppPane for TrainingPanel {
                         }
                         let sender = self.export_channel.0.clone();
                         let ctx = ui.ctx().clone();
-                        let slot = process.current_splats();
 
                         task::spawn(async move {
-                            let Some(splats) = slot.clone_main().await else {
+                            let Some(splats) = slot.get_main() else {
                                 return;
                             };
 

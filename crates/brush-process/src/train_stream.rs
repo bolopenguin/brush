@@ -10,11 +10,11 @@ use brush_render::{
     MainBackend,
     gaussian_splats::{SplatRenderMode, Splats},
 };
-use brush_rerun::visualize_tools::VisualizeTools;
+use brush_rerun::{RerunConfig, visualize_tools::VisualizeTools};
 use brush_train::{
     RandomSplatsConfig, create_random_splats,
     eval::eval_stats,
-    msg::RefineStats,
+    msg::{RefineStats, TrainStepStats},
     splats_into_autodiff, to_init_splats,
     train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds},
 };
@@ -127,14 +127,12 @@ pub(crate) async fn train_stream(
     // If the metadata has an up axis prefer that, otherwise estimate the up direction.
     let up_axis = up_axis.or(Some(estimated_up));
 
-    splat_slot.set(init_splats.clone()).await;
+    *splat_slot.write() = vec![init_splats.clone()];
     emitter
         .emit(ProcessMessage::SplatsUpdated {
             up_axis,
             frame: 0,
             total_frames: 1,
-            num_splats: init_splats.num_splats(),
-            sh_degree: init_splats.sh_degree(),
         })
         .await;
 
@@ -151,28 +149,16 @@ pub(crate) async fn train_stream(
     let bounds = get_splat_bounds(init_splats.clone(), BOUND_PERCENTILE).await;
     let mut trainer = SplatTrainer::new(&train_stream_config.train_config, &device, bounds);
 
-    // Get the dataset name from the base path (if available) for interpolation.
-    let dataset_name = vfs
-        .base_path()
-        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "dataset".to_owned());
+    let export_path = if let Some(base_path) = vfs.base_path() {
+        base_path.join("exports")
+    } else {
+        // Defaults to CWD.
+        PathBuf::from("./")
+    };
 
-    // Interpolate {dataset} in the export path.
-    let export_path_str = train_stream_config
-        .process_config
-        .export_path
-        .replace("{dataset}", &dataset_name);
-
-    // Resolve relative to the dataset's parent directory if available, otherwise CWD.
-    let base_path = vfs
-        .base_path()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    let export_path = base_path.join(&export_path_str);
+    let export_path = export_path.join(&train_stream_config.process_config.export_path);
     // Normalize path components
     let export_path: PathBuf = export_path.components().collect();
-    let sh_degree = init_splats.sh_degree();
 
     log::info!("Start training loop.");
     for iter in
@@ -180,19 +166,19 @@ pub(crate) async fn train_stream(
     {
         let step_time = Instant::now();
 
-        // Wait for next batch.
-        let batch = dataloader
-            .next_batch()
-            .instrument(trace_span!("Wait for next data batch"))
-            .await;
+        // Scope so we're sure we're sharing memory for the splat.
+        let stats = {
+            let batch = dataloader
+                .next_batch()
+                .instrument(trace_span!("Wait for next data batch"))
+                .await;
 
-        let stats = splat_slot
-            .act(0, |splats| async {
-                let (new_splats, stats) = trainer.step(batch, splats_into_autodiff(splats)).await;
-                (new_splats.valid(), stats)
-            })
-            .await
-            .unwrap();
+            let mut splat_handle = splat_slot.write();
+            let splats = splats_into_autodiff(splat_handle.remove(0));
+            let (new_splats, stats) = trainer.step(batch, splats);
+            *splat_handle = vec![new_splats.valid()];
+            stats
+        };
 
         let train_t =
             (iter as f32 / train_stream_config.train_config.total_steps as f32).clamp(0.0, 1.0);
@@ -201,18 +187,18 @@ pub(crate) async fn train_stream(
             && iter.is_multiple_of(train_stream_config.train_config.refine_every)
             && train_t <= 0.95
         {
-            splat_slot
-                .act(0, async |splats| trainer.refine(iter, splats).await)
-                .await
-                .unwrap()
+            let splats = splat_slot.get_main().unwrap();
+            let (new_splats, refine) = trainer
+                .refine(iter, splats)
+                .instrument(trace_span!("Refine splats"))
+                .await;
+            *splat_slot.write() = vec![new_splats];
+            Some(refine)
         } else {
-            let new_total: u32 = splat_slot.map(0, |s| s.num_splats()).await.unwrap();
-            RefineStats {
-                num_added: 0,
-                num_pruned: 0,
-                total_splats: new_total,
-            }
+            None
         };
+
+        let splats = splat_slot.get_main().unwrap();
 
         // We just finished iter 'iter', now starting iter + 1.
         let iter = iter + 1;
@@ -235,7 +221,7 @@ pub(crate) async fn train_stream(
                 &device,
                 &emitter,
                 &visualize,
-                splat_slot.clone_main().await.unwrap(),
+                splats.clone(),
                 iter,
                 eval_scene,
                 save_path,
@@ -251,7 +237,7 @@ pub(crate) async fn train_stream(
         #[cfg(not(target_family = "wasm"))]
         if iter % process_config.export_every == 0 || is_last_step {
             let res = export_checkpoint(
-                splat_slot.clone_main().await.unwrap(),
+                splats.clone(),
                 &export_path,
                 &process_config.export_name,
                 iter,
@@ -265,37 +251,27 @@ pub(crate) async fn train_stream(
             }
         }
 
-        {
-            let rerun_config = &train_stream_config.rerun_config;
-            visualize
-                .log_splat_stats(iter, refine.total_splats)
-                .unwrap();
+        let res = rerun_log(
+            &train_stream_config.rerun_config,
+            &visualize,
+            splats.clone(),
+            &stats,
+            iter,
+            is_last_step,
+            &device,
+            refine.as_ref(),
+        )
+        .await
+        .context("Rerun visualization failed");
 
-            if let Some(every) = rerun_config.rerun_log_splats_every
-                && (iter.is_multiple_of(every) || is_last_step)
-            {
-                let splats = splat_slot.clone_main().await.unwrap();
-                visualize.log_splats(iter, splats).await.unwrap();
-            }
-
-            // Log out train stats.
-            if iter.is_multiple_of(rerun_config.rerun_log_train_stats_every) || is_last_step {
-                visualize
-                    .log_train_stats(iter, stats.clone())
-                    .await
-                    .unwrap();
-            }
-
-            visualize.log_memory(iter, &WgpuRuntime::client(&device).memory_usage())?;
-            if refine.num_added > 0 {
-                visualize.log_refine_stats(iter, &refine).unwrap();
-            }
+        if let Err(error) = res {
+            emitter.emit(ProcessMessage::Warning { error }).await;
         }
 
-        if refine.num_added > 0 {
+        if refine.is_some() {
             emitter
                 .emit(ProcessMessage::TrainMessage(TrainMessage::RefineStep {
-                    cur_splat_count: refine.total_splats,
+                    cur_splat_count: splats.num_splats(),
                     iter,
                 }))
                 .await;
@@ -309,8 +285,6 @@ pub(crate) async fn train_stream(
                     up_axis: None,
                     frame: 0,
                     total_frames: 1,
-                    num_splats: refine.total_splats,
-                    sh_degree,
                 })
                 .await;
 
@@ -350,13 +324,12 @@ async fn run_eval(
 
         let eval_img = view.image.load().await?;
         let sample = eval_stats(
-            splats.clone(),
+            &splats,
             &view.camera,
             eval_img,
             view.image.alpha_mode(),
             device,
         )
-        .await
         .context("Failed to run eval for sample.")?;
 
         count += 1;
@@ -412,5 +385,37 @@ async fn export_checkpoint(
     tokio::fs::write(export_path.join(&export_name), splat_data)
         .await
         .context(format!("Failed to export ply {export_path:?}"))?;
+    Ok(())
+}
+
+async fn rerun_log(
+    rerun_config: &RerunConfig,
+    visualize: &VisualizeTools,
+    splats: Splats<MainBackend>,
+    stats: &TrainStepStats<MainBackend>,
+    iter: u32,
+    is_last_step: bool,
+    device: &WgpuDevice,
+    refine: Option<&RefineStats>,
+) -> Result<(), anyhow::Error> {
+    visualize.log_splat_stats(iter, &splats)?;
+
+    if let Some(every) = rerun_config.rerun_log_splats_every
+        && (iter.is_multiple_of(every) || is_last_step)
+    {
+        visualize.log_splats(iter, splats.clone()).await?;
+    }
+
+    // Log out train stats.
+    if iter.is_multiple_of(rerun_config.rerun_log_train_stats_every) || is_last_step {
+        visualize.log_train_stats(iter, stats.clone()).await?;
+    }
+
+    let client = WgpuRuntime::client(device);
+    visualize.log_memory(iter, &client.memory_usage())?;
+    // Emit some messages. Important to not count these in the training time (as this might pause).
+    if let Some(stats) = refine {
+        visualize.log_refine_stats(iter, stats)?;
+    }
     Ok(())
 }

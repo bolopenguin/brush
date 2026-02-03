@@ -21,9 +21,13 @@ use tracing::trace_span;
     about = "Brush - universal splats"
 )]
 pub struct Cli {
-    /// Source to load from (path or URL).
-    #[arg(value_name = "PATH_OR_URL")]
+    /// Training folder or source to load from (path or URL).
+    #[arg(long = "train-folder", value_name = "PATH_OR_URL")]
     pub source: Option<DataSource>,
+
+    /// Output file path or URL to save the trained Eyesplat Neural Twin to.
+    #[arg(long = "output-file", value_name = "PATH_OR_URL")]
+    pub out_nt: Option<DataSource>,
 
     #[arg(
         long,
@@ -42,7 +46,7 @@ impl Cli {
         if !self.with_viewer && self.source.is_none() {
             return Err(Error::raw(
                 ErrorKind::MissingRequiredArgument,
-                "When --with-viewer is false, --source must be provided",
+                "When --with-viewer is false, --train-folder must be provided",
             ));
         }
         Ok(self)
@@ -244,6 +248,8 @@ pub async fn run_cli_ui(
         "Done training! Took {:?}.",
         humantime::format_duration(duration_secs)
     );
+
+    // Convert the ply to an EyesplatNeuralTwin file.
 
     Ok(())
 }

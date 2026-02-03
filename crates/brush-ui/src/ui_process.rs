@@ -65,11 +65,11 @@ impl UiProcess {
         self.write().background_style = style;
     }
 
-    pub(crate) fn current_splats(&self) -> Slot<Splats<MainBackend>> {
+    pub(crate) fn current_splats(&self) -> Option<Slot<Splats<MainBackend>>> {
         self.read()
             .process_handle
             .as_ref()
-            .map_or(Slot::default(), |s| s.splat_view.clone())
+            .map(|s| s.splat_view.clone())
     }
 
     pub fn is_loading(&self) -> bool {
@@ -108,10 +108,6 @@ impl UiProcess {
         self.read().train_paused
     }
 
-    pub(crate) fn train_iter(&self) -> u32 {
-        self.read().train_iter
-    }
-
     pub fn get_cam_settings(&self) -> CameraSettings {
         self.read().controls.settings.clone()
     }
@@ -143,14 +139,7 @@ impl UiProcess {
     }
 
     pub fn set_cam_fov(&self, fov_y: f64) {
-        let mut inner = self.write();
-        // Scale fov_x proportionally to maintain the camera's aspect ratio.
-        // This allows setting FOV smaller than the dataset FOV.
-        let old_fov_y = inner.camera.fov_y;
-        let aspect = (inner.camera.fov_x / 2.0).tan() / (old_fov_y / 2.0).tan();
-        inner.camera.fov_y = fov_y;
-        inner.camera.fov_x = 2.0 * (aspect * (fov_y / 2.0).tan()).atan();
-        drop(inner);
+        self.write().camera.fov_y = fov_y;
         self.read().repaint();
     }
 
@@ -246,16 +235,9 @@ impl UiProcess {
                 Ok(ProcessMessage::StartLoading { training, .. }) => {
                     inner.is_training = *training;
                     inner.is_loading = true;
-                    inner.train_iter = 0;
                 }
                 Ok(ProcessMessage::DoneLoading) => {
                     inner.is_loading = false;
-                }
-                #[cfg(feature = "training")]
-                Ok(ProcessMessage::TrainMessage(
-                    brush_process::message::TrainMessage::TrainStep { iter, .. },
-                )) => {
-                    inner.train_iter = *iter;
                 }
                 Err(_) => {
                     inner.is_loading = false;
@@ -299,10 +281,6 @@ impl UiProcess {
         inner.session_reset_requested = false;
         requested
     }
-
-    pub fn burn_device(&self) -> WgpuDevice {
-        self.read().burn_device.clone()
-    }
 }
 
 struct UiProcessInner {
@@ -315,7 +293,6 @@ struct UiProcessInner {
     ui_mode: UiMode,
     background_style: BackgroundStyle,
     train_paused: bool,
-    train_iter: u32,
     reset_layout_requested: bool,
     session_reset_requested: bool,
     ui_ctx: egui::Context,
@@ -336,7 +313,6 @@ impl UiProcessInner {
             splat_scale: None,
             is_loading: false,
             is_training: false,
-            train_iter: 0,
             process_handle: None,
             ui_mode: UiMode::Default,
             background_style: BackgroundStyle::Black,

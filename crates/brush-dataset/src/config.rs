@@ -31,4 +31,16 @@ pub struct LoadDataseConfig {
     /// Whether to interpret an alpha channel (or masks) as transparency or masking.
     #[arg(long, help_heading = "Dataset Options")]
     pub alpha_mode: Option<AlphaMode>,
+    /// The Image key to use in the underfolder dataset.
+    #[arg(long, help_heading = "Dataset Options", default_value = "image")]
+    pub image_key: String,
+    /// The Mask key to use in the underfolder dataset.
+    #[arg(long, help_heading = "Dataset Options", default_value = "mask")]
+    pub mask_key: String,
+    /// The Camera key to use in the underfolder dataset.
+    #[arg(long, help_heading = "Dataset Options", default_value = "camera")]
+    pub camera_key: String,
+    /// The World-to-Camera key to use in the underfolder dataset.
+    #[arg(long, help_heading = "Dataset Options", default_value = "w2c")]
+    pub w2c_key: String,
 }

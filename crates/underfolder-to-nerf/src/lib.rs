@@ -190,7 +190,7 @@ fn parse_w2c_file(path: &str) -> io::Result<nalgebra::Matrix4<f32>> {
     Ok(nalgebra::Matrix4::from_row_slice(&values))
 }
 
-fn parse_image(path_image: &str, path_mask: &str) -> io::Result<RgbaImage> {
+fn parse_image(path_image: &str, path_mask: Option<&str>) -> io::Result<RgbaImage> {
     // Load image and mask once, directly to desired format
     let mut img = ImageReader::open(path_image)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
@@ -198,23 +198,25 @@ fn parse_image(path_image: &str, path_mask: &str) -> io::Result<RgbaImage> {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
         .to_rgba8();
 
-    let mask = ImageReader::open(path_mask)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-        .decode()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-        .to_luma8();
+    if let Some(path_mask) = path_mask {
+        let mask = ImageReader::open(path_mask)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+            .decode()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+            .to_luma8();
 
-    // Ensure mask dimensions match image
-    if img.dimensions() != mask.dimensions() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Image and mask dimensions do not match",
-        ));
-    }
+        // Ensure mask dimensions match image
+        if img.dimensions() != mask.dimensions() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Image and mask dimensions do not match",
+            ));
+        }
 
-    // Directly modify alpha channel in place - much faster than parallel overhead
-    for (pixel, &mask_value) in img.pixels_mut().zip(mask.pixels()) {
-        pixel[3] = mask_value[0];
+        // Directly modify alpha channel in place - much faster than parallel overhead
+        for (pixel, &mask_value) in img.pixels_mut().zip(mask.pixels()) {
+            pixel[3] = mask_value[0];
+        }
     }
 
     Ok(img)
@@ -255,7 +257,7 @@ pub fn convert_underfolder_to_nerf(
     assert!(!image_files.is_empty(), "No image files found");
     let mut mask_files = find_files_with_sub_str(path_in, mask_key).unwrap();
     mask_files.sort();
-    assert!(!mask_files.is_empty(), "No mask files found");
+
     let mut camera_files = find_files_with_sub_str(path_in, camera_key).unwrap();
     camera_files.sort();
     assert!(!camera_files.is_empty(), "No camera files found");
@@ -263,7 +265,9 @@ pub fn convert_underfolder_to_nerf(
     w2c_files.sort();
     assert!(!w2c_files.is_empty(), "No w2c files found");
 
-    assert!(image_files.len() == mask_files.len());
+    if !mask_files.is_empty() {
+        assert!(image_files.len() == mask_files.len());
+    }
     assert!(image_files.len() == w2c_files.len());
     if camera_files.len() != 1 {
         assert!(
@@ -313,7 +317,11 @@ pub fn convert_underfolder_to_nerf(
 
             // Parse image and mask
             let image_file = &image_files[i];
-            let mask_file = &mask_files[i];
+            let mask_file = if !mask_files.is_empty() {
+                Some(mask_files[i].as_str())
+            } else {
+                None
+            };
             let image = parse_image(image_file, mask_file).unwrap();
 
             // Ensure output folder exists (safe to call in parallel)

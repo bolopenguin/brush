@@ -62,3 +62,18 @@ WORKDIR /app
 
 ENTRYPOINT ["brush"]
 
+
+# docker build \
+#   -f extras/Dockerfile \
+#   -t brush \
+#   --add-host wheels.eyecan.ai:192.168.178.23 \
+#   --label ai.eyecan.task.manifest="$(jq -c . manifest.json)" \
+#   .
+
+# docker run --rm -it \
+#   --gpus all \
+#   --runtime=nvidia \
+#   -v ~/data/lego_uf_train_test:/data \
+#   -v /tmp:/output \
+#   brush \
+#   --train-folder /data --output-file /output/test.nt --total-steps 100

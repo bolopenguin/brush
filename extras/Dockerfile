@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Rust for building Brush
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
-# Clone and build Brush
-RUN git clone https://github.com/ArthurBrussee/brush
+# Copy local brush source (build from local, not GitHub)
+COPY . /brush
 
 # Set the working directory to the brush project
 WORKDIR /brush
@@ -45,18 +45,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
     libqt5gui5 \
     libqt5widgets5 \
     libcurl4 \
+    python3 python3-pip \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Install eyesplat from custom wheel server (optional - may not be available)
+RUN pip3 install --no-cache-dir --break-system-packages --upgrade --root-user-action=ignore -f http://wheels.eyecan.ai:8000 --trusted-host wheels.eyecan.ai eyesplat
+
 # Copy the built Brush binary
-COPY --from=builder ./brush/target/release/brush /usr/local/bin/brush
+COPY --from=builder /brush/target/release/brush /usr/local/bin/brush
+
+# Copy the entire project (includes python/) to runtime
+COPY --from=builder /brush /app
+
+# Set working directory so the binary can find python/decode_splat.py
+WORKDIR /app
 
 ENTRYPOINT ["brush"]
 
-
-# docker run --rm -it \
-#   --gpus all \
-#   --runtime=nvidia \
-#   -v /home/damiano-eyecan/dev/data/toy_dataset_nerf:/input \
-#   -v /tmp/test:/output \
-#   brush \
-#   /input --export-path /output/test.ply

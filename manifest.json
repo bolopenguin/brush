@@ -1,0 +1,61 @@
+{
+  "type": "object",
+  "title": "make-twin-trantor-rust",
+  "description": "Make twin trantor with Rust.",
+  "version": "0.0.0",
+  "properties": {
+    "inputs": {
+      "$ref": "#/$defs/Inputs"
+    },
+    "outputs": {
+      "$ref": "#/$defs/Outputs"
+    }
+  },
+  "required": [
+    "inputs",
+    "outputs"
+  ],
+  "hw_requirements": {
+    "cpu": 1,
+    "ram": 1,
+    "compute_gpu": 1
+  },
+  "$defs": {
+    "Inputs": {
+      "properties": {
+        "train_folder": {
+          "description": "",
+          "format": "directory-path",
+          "title": "Train Folder",
+          "type": "string"
+        },
+        "total_steps": {
+          "description": "",
+          "title": "Total Steps",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "train_folder",
+        "total_steps"
+      ],
+      "title": "Inputs",
+      "type": "object"
+    },
+    "Outputs": {
+      "properties": {
+        "output_file": {
+          "description": "",
+          "format": "file-path",
+          "title": "Output File",
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_file"
+      ],
+      "title": "Outputs",
+      "type": "object"
+    }
+  }
+}

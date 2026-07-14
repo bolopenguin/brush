@@ -1,71 +1,81 @@
 #![recursion_limit = "256"]
 
-use burn::prelude::Backend;
-use burn::tensor::ops::FloatTensor;
-use burn_cubecl::CubeBackend;
-use burn_fusion::Fusion;
-use burn_wgpu::WgpuRuntime;
+use brush_cube::MainBackend as Wgpu;
+use burn::backend::Backend;
+use burn::backend::tensor::FloatTensor;
 use camera::Camera;
 use clap::ValueEnum;
 use glam::Vec3;
-use render_aux::RenderAux;
 
 use crate::gaussian_splats::SplatRenderMode;
-pub use crate::gaussian_splats::render_splats;
+pub use crate::gaussian_splats::{Splats, TextureMode, render_splats};
+pub use crate::render_aux::{RenderAux, RenderAuxInner, RenderOutput};
 
-mod burn_glue;
-mod dim_check;
+pub mod burn_glue;
+#[doc(hidden)]
+pub mod dim_check;
+#[doc(hidden)]
+pub mod kernels;
 pub mod render_aux;
 pub mod shaders;
 
 pub mod sh;
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 mod tests;
 
 pub mod bounding_box;
 pub mod camera;
 pub mod gaussian_splats;
-mod get_tile_offset;
+#[doc(hidden)]
+pub mod get_tile_offset;
 pub mod render;
 pub mod validation;
 
-pub type MainBackendBase = CubeBackend<WgpuRuntime, f32, i32, u32>;
-pub type MainBackend = Fusion<MainBackendBase>;
-
-#[derive(Debug, Clone)]
-pub struct RenderStats {
-    pub num_visible: u32,
-    pub num_intersections: u32,
+/// `DispatchTensorKind` variant for the active wgpu backend. burn-dispatch
+/// uses different variant names per backend; brush only ever runs on the
+/// `WebGpu` variant, so this macro hides the variant name from match arms.
+#[macro_export]
+macro_rules! wgpu_kind {
+    ($($t:tt)*) => {
+        $crate::__wgpu_kind!($($t)*)
+    };
 }
 
-// The maximum number of intersections that can be rendered.
-//
-// With 2D dispatch support, we can now handle more than the original 65535 workgroup limit.
-// Doubled from the original 512 * 65535 to allow higher resolution rendering.
-const INTERSECTS_UPPER_BOUND: u32 = 2 * 512 * 65535;
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __wgpu_kind {
+    ($($t:tt)*) => { ::burn::backend::DispatchTensorKind::Wgpu($($t)*) };
+}
 
-pub trait SplatForward<B: Backend> {
-    /// Render splats to a buffer.
+/// Trait for the gaussian splatting rendering pipeline.
+///
+/// A single call performs: cull → readback → rasterize.
+///
+/// `#[backend_extension(Wgpu)]` generates `impl SplatOps for Dispatch`, which
+/// unwraps the type-erased `Tensor<D>` dispatch primitives to the concrete
+/// Wgpu backend, calls the hand-written `impl SplatOps for Wgpu`, and re-wraps
+/// the `RenderOutput` via its `ExtensionType` derive. Only the non-autodiff
+/// arm is generated: the differentiable path is a hand-rolled `Backward` in
+/// `brush-render-bwd` and never dispatches `render` through `Autodiff`.
+#[burn::backend::backend_extension(Wgpu)]
+pub trait SplatOps: Backend {
+    /// Render gaussian splats to an image.
     ///
-    /// This projects the gaussians, sorts them, and rasterizes them to a buffer, in a
-    /// differentiable way.
-    /// The arguments are all passed as raw tensors. See [`Splats`] for a convenient Module that wraps this fun
-    /// The [`xy_grad_dummy`] variable is only used to carry screenspace xy gradients.
-    /// This function can optionally render a "u32" buffer, which is a packed RGBA (8 bits per channel)
-    /// buffer. This is useful when the results need to be displayed immediately.
-    fn render_splats(
+    /// Full forward pipeline: cull, depth sort, readback, project, rasterize.
+    /// `pass` picks forward-only vs. forward+backward-bookkeeping, and (only
+    /// for tests) toggles the C^1 smoothstep around the alpha cutoff.
+    #[allow(clippy::too_many_arguments)]
+    fn render(
         camera: &Camera,
         img_size: glam::UVec2,
-        means: FloatTensor<B>,
-        log_scales: FloatTensor<B>,
-        quats: FloatTensor<B>,
-        sh_coeffs: FloatTensor<B>,
-        raw_opacities: FloatTensor<B>,
+        transforms: FloatTensor<Self>,
+        sh_coeffs: FloatTensor<Self>,
+        raw_opacities: FloatTensor<Self>,
         render_mode: SplatRenderMode,
         background: Vec3,
-        bwd_info: bool,
-    ) -> (FloatTensor<B>, RenderAux<B>);
+        pass: gaussian_splats::RasterPass,
+    ) -> impl Future<Output = RenderOutput<Self>>;
 }
 
 #[derive(

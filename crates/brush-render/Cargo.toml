@@ -7,30 +7,42 @@ license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
+brush-cube.path = "../brush-cube"
 brush-prefix-sum.path = "../brush-prefix-sum"
-assert_approx_eq.workspace = true
-brush-kernel.path = "../brush-kernel"
 brush-sort.path = "../brush-sort"
-brush-wgsl.path = "../brush-wgsl"
 
-burn.workspace = true
-bytemuck = { workspace = true, features = ["derive"] }
+burn = { workspace = true, features = ["wgpu"] }
 burn-wgpu.workspace = true
 burn-cubecl.workspace = true
 burn-fusion.workspace = true
 burn-ir.workspace = true
 
+assert_approx_eq.workspace = true
 glam.workspace = true
 clap.workspace = true
 serde.workspace = true
 tracing.workspace = true
 log.workspace = true
+bytemuck.workspace = true
 
-[package.metadata.cargo-shear]
-ignored = ["bytemuck"]
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [features]
 debug-validation = []
 
+# Force the WebGPU backend on every platform. We previously used Vulkan
+# on Linux/Windows and Metal on macOS, but both produced random crashes
+# (see #423 / #395 — buffer-destroyed validation errors, ARM/AMD instability).
+# WebGPU runs through wgpu's WGSL frontend everywhere so we avoid the
+# per-backend cubecl codegen divergence.
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 [lints]
 workspace = true
+
+[package.metadata.cargo-shear]
+ignored = ["getrandom"]

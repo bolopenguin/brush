@@ -4,7 +4,6 @@ use std::time::Duration;
 use async_fn_stream::{TryStreamEmitter, try_fn_stream};
 use brush_render::gaussian_splats::{SplatRenderMode, Splats, inverse_sigmoid};
 use brush_render::sh::rgb_to_sh;
-use brush_vfs::SendNotWasm;
 use glam::{Vec3, Vec4Swizzles};
 use serde::Deserialize;
 use serde::de::{DeserializeSeed, Error};
@@ -12,7 +11,6 @@ use serde_ply::{DeserializeError, PlyChunkedReader, RowVisitor};
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio_stream::{Stream, StreamExt};
-use tokio_with_wasm::alias as tokio_wasm;
 
 use crate::ply_gaussian::{PlyGaussian, QuantSh, QuantSplat};
 
@@ -42,12 +40,41 @@ impl SplatData {
         self.means.len() / 3
     }
 
+    /// Strided subsample down to at most `max_splats` points.
+    ///
+    /// COLMAP / large PLY initialisations can hold far more points than the
+    /// training budget. Constructing GPU tensors for all of them blows the
+    /// buffer-size limit before training even starts, so cap the initial
+    /// point count here. No-op when already within budget.
+    pub fn subsample(self, max_splats: usize) -> Self {
+        let n = self.num_splats();
+        if max_splats == 0 || n <= max_splats {
+            return self;
+        }
+        // Ceil so the result never exceeds `max_splats`.
+        let step = n.div_ceil(max_splats);
+
+        let pick = |v: &[f32], stride: usize| -> Vec<f32> {
+            v.chunks_exact(stride)
+                .step_by(step)
+                .flatten()
+                .copied()
+                .collect()
+        };
+
+        let sh_stride = self.sh_coeffs.as_deref().map_or(0, |c| c.len() / n);
+
+        Self {
+            means: pick(&self.means, 3),
+            rotations: self.rotations.as_deref().map(|v| pick(v, 4)),
+            log_scales: self.log_scales.as_deref().map(|v| pick(v, 3)),
+            sh_coeffs: self.sh_coeffs.as_deref().map(|v| pick(v, sh_stride)),
+            raw_opacities: self.raw_opacities.as_deref().map(|v| pick(v, 1)),
+        }
+    }
+
     /// Convert into Splats using simple defaults for missing fields.
-    pub fn into_splats<B: burn::prelude::Backend>(
-        self,
-        device: &B::Device,
-        mode: SplatRenderMode,
-    ) -> Splats<B> {
+    pub fn into_splats(self, device: &burn::tensor::Device, mode: SplatRenderMode) -> Splats {
         let n_splats = self.num_splats();
         let rotations = self
             .rotations
@@ -128,7 +155,7 @@ async fn read_chunk<T: AsyncRead + Unpin>(
             break;
         }
         total_read += bytes_read;
-        tokio_wasm::task::yield_now().await;
+        brush_async::yield_now().await;
     }
     if total_read == 0 {
         Err(std::io::Error::new(
@@ -140,7 +167,7 @@ async fn read_chunk<T: AsyncRead + Unpin>(
     }
 }
 
-pub async fn load_splat_from_ply<T: AsyncRead + SendNotWasm + Unpin>(
+pub async fn load_splat_from_ply<T: AsyncRead + Unpin>(
     reader: T,
     subsample_points: Option<u32>,
 ) -> Result<SplatMessage, DeserializeError> {
@@ -153,7 +180,7 @@ pub async fn load_splat_from_ply<T: AsyncRead + SendNotWasm + Unpin>(
     splat
 }
 
-pub fn stream_splat_from_ply<T: AsyncRead + SendNotWasm + Unpin>(
+pub fn stream_splat_from_ply<T: AsyncRead + Unpin>(
     mut reader: T,
     subsample_points: Option<u32>,
     streaming: bool,
@@ -162,21 +189,34 @@ pub fn stream_splat_from_ply<T: AsyncRead + SendNotWasm + Unpin>(
         let mut file = PlyChunkedReader::new();
         read_chunk(&mut reader, file.buffer_mut()).await?;
 
-        let header = file.header().expect("Must have header");
+        let header = file
+            .header()
+            .ok_or_else(|| DeserializeError::custom("missing PLY header"))?;
         // Parse some metadata.
         let up_axis = header
             .comments
             .iter()
             .filter_map(|c| {
-                match c
-                    .to_lowercase()
-                    .strip_prefix("vertical axis: ")
-                    .map(|s| s.trim())
-                {
-                    Some("x") => Some(Vec3::X),
-                    Some("y") => Some(Vec3::NEG_Y),
-                    Some("z") => Some(Vec3::NEG_Z),
-                    _ => None,
+                let s = c.to_lowercase();
+                let suffix = s.strip_prefix("vertical axis: ")?.trim();
+                match suffix {
+                    "x" => Some(Vec3::X),
+                    "y" => Some(Vec3::NEG_Y),
+                    "z" => Some(Vec3::NEG_Z),
+                    _ => {
+                        let parts: Vec<f32> = suffix
+                            .split(|ch: char| {
+                                ch == ',' || ch.is_whitespace() || ch == '[' || ch == ']'
+                            })
+                            .filter(|s| !s.is_empty())
+                            .filter_map(|p| p.parse::<f32>().ok())
+                            .collect();
+                        if parts.len() == 3 {
+                            Some(Vec3::new(parts[0], parts[1], parts[2]))
+                        } else {
+                            None
+                        }
+                    }
                 }
             })
             .next_back();
@@ -187,7 +227,7 @@ pub fn stream_splat_from_ply<T: AsyncRead + SendNotWasm + Unpin>(
             .filter_map(|c| {
                 match c
                     .to_lowercase()
-                    .strip_prefix("SplatRenderMode: ")
+                    .strip_prefix("splatrendermode: ")
                     .map(|s| s.trim())
                 {
                     Some("mip") => Some(SplatRenderMode::Mip),
@@ -265,7 +305,9 @@ async fn parse_ply<T: AsyncRead + Unpin>(
     render_mode: Option<SplatRenderMode>,
     update: &mut TimedUpdate,
 ) -> Result<(), DeserializeError> {
-    let header = file.header().expect("Must have header");
+    let header = file
+        .header()
+        .ok_or_else(|| DeserializeError::custom("missing PLY header"))?;
     let vertex = header
         .get_element("vertex")
         .ok_or(DeserializeError::custom("Unknown format"))?;
@@ -447,7 +489,7 @@ async fn parse_compressed_ply<T: AsyncRead + Unpin>(
 
     let sh_vals = file
         .header()
-        .expect("Must have header")
+        .ok_or_else(|| DeserializeError::custom("missing PLY header"))?
         .elem_defs
         .get(2)
         .cloned();
@@ -555,18 +597,23 @@ async fn parse_compressed_ply<T: AsyncRead + Unpin>(
     Ok(())
 }
 
-#[cfg(all(test, feature = "export"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::export::splat_to_ply;
     use crate::test_utils::{create_test_splats, create_test_splats_with_count};
     use brush_render::sh::sh_coeffs_for_degree;
     use std::io::Cursor;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    #[tokio::test]
+    #[cfg(target_family = "wasm")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_import_basic_functionality() {
+        let _device = brush_cube::test_helpers::test_device().await;
         let original_splats = create_test_splats(1);
-        let ply_bytes = splat_to_ply(original_splats.clone()).await.unwrap();
+        let ply_bytes = splat_to_ply(original_splats.clone(), None).await.unwrap();
 
         let cursor = Cursor::new(ply_bytes);
         let imported_message = load_splat_from_ply(cursor, None).await.unwrap();
@@ -580,11 +627,12 @@ mod tests {
         assert!(imported_message.data.raw_opacities.is_some());
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_import_different_sh_degrees() {
+        let _device = brush_cube::test_helpers::test_device().await;
         for degree in [0, 1, 2] {
             let original_splats = create_test_splats(degree);
-            let ply_bytes = splat_to_ply(original_splats).await.unwrap();
+            let ply_bytes = splat_to_ply(original_splats, None).await.unwrap();
 
             let cursor = Cursor::new(ply_bytes);
             let imported_message = load_splat_from_ply(cursor, None).await.unwrap();
@@ -596,13 +644,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_import_with_subsample() {
+        let _device = brush_cube::test_helpers::test_device().await;
         // Create 4 test splats
         let original_splats = create_test_splats_with_count(0, 4);
         assert_eq!(original_splats.num_splats(), 4);
 
-        let ply_bytes = splat_to_ply(original_splats).await.unwrap();
+        let ply_bytes = splat_to_ply(original_splats, None).await.unwrap();
 
         // Test no subsampling
         let cursor = Cursor::new(ply_bytes.clone());
@@ -613,5 +662,67 @@ mod tests {
         let cursor = Cursor::new(ply_bytes);
         let imported_message = load_splat_from_ply(cursor, Some(2)).await.unwrap();
         assert_eq!(imported_message.data.num_splats(), 2);
+    }
+
+    #[test]
+    fn test_splat_data_subsample() {
+        let n = 10;
+        // Per-splat value == splat index, so we can check which rows survived.
+        let make = |stride: usize| -> Vec<f32> {
+            (0..n)
+                .flat_map(|i| std::iter::repeat_n(i as f32, stride))
+                .collect()
+        };
+        let data = SplatData {
+            means: make(3),
+            rotations: Some(make(4)),
+            log_scales: Some(make(3)),
+            sh_coeffs: Some(make(6)),
+            raw_opacities: Some(make(1)),
+        };
+
+        // Within budget: untouched.
+        let same = data.clone().subsample(10);
+        assert_eq!(same.num_splats(), 10);
+        let same = data.clone().subsample(0);
+        assert_eq!(same.num_splats(), 10);
+
+        // step = ceil(10 / 3) = 4 -> rows 0, 4, 8 survive.
+        let sub = data.subsample(3);
+        assert_eq!(sub.num_splats(), 3);
+        assert!(sub.num_splats() <= 3);
+        assert_eq!(sub.means, vec![0., 0., 0., 4., 4., 4., 8., 8., 8.]);
+        assert_eq!(
+            sub.rotations.unwrap(),
+            vec![0., 0., 0., 0., 4., 4., 4., 4., 8., 8., 8., 8.]
+        );
+        assert_eq!(
+            sub.log_scales.unwrap(),
+            vec![0., 0., 0., 4., 4., 4., 8., 8., 8.]
+        );
+        let sh = sub.sh_coeffs.unwrap();
+        assert_eq!(sh.len(), 3 * 6);
+        assert_eq!(&sh[0..6], &[0., 0., 0., 0., 0., 0.]);
+        assert_eq!(&sh[6..12], &[4., 4., 4., 4., 4., 4.]);
+        assert_eq!(sub.raw_opacities.unwrap(), vec![0., 4., 8.]);
+    }
+
+    #[wasm_bindgen_test(unsupported = tokio::test)]
+    async fn test_import_custom_up_axis() {
+        let _device = brush_cube::test_helpers::test_device().await;
+        let original_splats = create_test_splats(1);
+        let custom_up = Vec3::new(0.123, 0.456, -0.789);
+        let ply_bytes = splat_to_ply(original_splats, Some(custom_up))
+            .await
+            .unwrap();
+
+        let cursor = Cursor::new(ply_bytes);
+        let imported_message = load_splat_from_ply(cursor, None).await.unwrap();
+
+        assert!(imported_message.meta.up_axis.is_some());
+        let imported_up = imported_message.meta.up_axis.unwrap();
+        assert!((imported_up.x - custom_up.x).abs() < 1e-5);
+        assert!((imported_up.y - custom_up.y).abs() < 1e-5);
+        assert!((imported_up.z - custom_up.z).abs() < 1e-5);
     }
 }

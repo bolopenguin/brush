@@ -85,8 +85,21 @@ pub fn config_to_args(config: &TrainStreamConfig) -> Vec<String> {
                 Value::Number(n) => {
                     args.push(format!("{arg_name} {n}"));
                 }
+                Value::Array(items) => {
+                    // Multi-value clap args (e.g. `num_args = 3`) need each element
+                    // as its own whitespace-separated token, since downstream parsing
+                    // splits on whitespace.
+                    let joined = items
+                        .iter()
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    args.push(format!("{arg_name} {joined}"));
+                }
                 _ => {
-                    // For other types, use the JSON representation
                     args.push(format!("{arg_name} {value}"));
                 }
             }
@@ -127,11 +140,12 @@ pub fn merge_configs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    #[test]
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_config_to_args_only_includes_changes() {
         let mut config = TrainStreamConfig::default();
-        config.train_config.total_steps = 5000;
+        config.train_config.total_train_iters = 5000;
         config.model_config.sh_degree = 2;
         config.load_config.max_frames = Some(10);
         let args = config_to_args(&config);
@@ -141,17 +155,25 @@ mod tests {
         // Verify they contain the right values
         let args_str = args.join(" ");
         assert!(
-            args_str.contains("--total-steps 5000"),
-            "Missing total-steps"
+            args_str.contains("--total-train-iters 5000"),
+            "Missing total-train-iters"
         );
         assert!(args_str.contains("--sh-degree 2"), "Missing sh-degree");
         assert!(args_str.contains("--max-frames 10"), "Missing max-frames");
     }
 
-    #[test]
+    #[wasm_bindgen_test(unsupported = test)]
+    fn test_config_to_args_vec_round_trip() {
+        let mut config = TrainStreamConfig::default();
+        config.train_config.background_color = vec![1.0, 0.5, 0.25];
+        let merged = merge_configs(&config, &TrainStreamConfig::default());
+        assert_eq!(merged.train_config.background_color, vec![1.0, 0.5, 0.25]);
+    }
+
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_config_round_trip() {
         let mut original = TrainStreamConfig::default();
-        original.train_config.total_steps = 5000;
+        original.train_config.total_train_iters = 5000;
         original.model_config.sh_degree = 2;
         original.load_config.max_frames = Some(10);
         original.process_config.seed = 123;
@@ -166,7 +188,7 @@ mod tests {
         }
 
         let parsed = TrainStreamConfig::try_parse_from(&cli_args).expect("Should parse");
-        assert_eq!(parsed.train_config.total_steps, 5000);
+        assert_eq!(parsed.train_config.total_train_iters, 5000);
         assert_eq!(parsed.model_config.sh_degree, 2);
         assert_eq!(parsed.load_config.max_frames, Some(10));
         assert_eq!(parsed.process_config.seed, 123);

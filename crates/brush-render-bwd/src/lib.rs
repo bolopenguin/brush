@@ -1,7 +1,8 @@
 pub mod burn_glue;
+mod kernels;
 mod render_bwd;
 
-pub use burn_glue::render_splats;
-
-#[cfg(test)]
-mod tests;
+pub use burn_glue::{
+    RasterizeGrads, SplatBwdOps, SplatGrads, SplatOutputDiff, render_splats,
+    render_splats_with_pass,
+};

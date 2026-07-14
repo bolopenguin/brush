@@ -1,96 +1,43 @@
-use brush_kernel::{CubeCount, calc_cube_count_1d};
+use brush_cube::{MainBackendBase, calc_cube_count_1d};
 use brush_render::gaussian_splats::SplatRenderMode;
-use brush_wgsl::wgsl_kernel;
-
-use brush_render::MainBackendBase;
+use brush_render::kernels::types::RasterizeUniformsLaunch;
 use brush_render::sh::sh_coeffs_for_degree;
+use burn::backend::TensorMetadata;
+use burn::backend::ops::FloatTensorOps;
+use burn::backend::tensor::{FloatTensor, IntTensor};
 use burn::tensor::FloatDType;
-use burn::tensor::ops::FloatTensorOps;
-use burn::{prelude::Backend, tensor::ops::FloatTensor};
-use burn_cubecl::cubecl::features::TypeUsage;
-use burn_cubecl::cubecl::ir::{ElemType, FloatKind, StorageType};
-use burn_cubecl::cubecl::server::Bindings;
+use burn_cubecl::cubecl::CubeCount;
+use burn_cubecl::cubecl::CubeDim;
+use burn_cubecl::cubecl::features::AtomicUsage;
+use burn_cubecl::cubecl::ir::{ElemType, FloatKind, Type};
 use burn_cubecl::kernel::into_contiguous;
-use glam::uvec2;
+use burn_wgpu::WgpuRuntime;
+use glam::{Vec3, uvec2};
 
-use crate::burn_glue::{GaussianBackwardState, SplatBackwardOps};
+use crate::burn_glue::{RasterizeGrads, SplatBwdOps, SplatGrads};
+use crate::kernels;
+use brush_render::shaders::helpers::ProjectUniforms;
 
-// Kernel definitions using proc macro
-#[wgsl_kernel(
-    source = "src/shaders/project_backwards.wgsl",
-    includes = ["../brush-render/src/shaders/helpers.wgsl"],
-)]
-pub struct ProjectBackwards {
-    mip_filter: bool,
-}
-
-#[wgsl_kernel(
-    source = "src/shaders/rasterize_backwards.wgsl",
-    includes = ["../brush-render/src/shaders/helpers.wgsl"],
-)]
-pub struct RasterizeBackwards {
-    pub hard_float: bool,
-    pub webgpu: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SplatGrads<B: Backend> {
-    pub v_means: FloatTensor<B>,
-    pub v_quats: FloatTensor<B>,
-    pub v_scales: FloatTensor<B>,
-    pub v_coeffs: FloatTensor<B>,
-    pub v_raw_opac: FloatTensor<B>,
-    pub v_refine_weight: FloatTensor<B>,
-}
-
-impl SplatBackwardOps<Self> for MainBackendBase {
-    fn render_splats_bwd(
-        state: GaussianBackwardState<Self>,
+impl SplatBwdOps for MainBackendBase {
+    fn rasterize_bwd(
+        out_img: FloatTensor<Self>,
+        projected_splats: FloatTensor<Self>,
+        compact_gid_from_isect: IntTensor<Self>,
+        tile_offsets: IntTensor<Self>,
+        background: Vec3,
+        img_size: glam::UVec2,
         v_output: FloatTensor<Self>,
-    ) -> SplatGrads<Self> {
-        // Comes from loss, might not be contiguous.
+        smooth_cutoff: bool,
+    ) -> RasterizeGrads<Self> {
+        let _span = tracing::trace_span!("rasterize_bwd").entered();
+
         let v_output = into_contiguous(v_output);
+        let device = out_img.device.clone();
+        let num_visible = projected_splats.shape()[0].max(1);
+        let client = projected_splats.client.clone();
 
-        // Comes from params, might not be contiguous.
-        let means = into_contiguous(state.means);
-        let log_scales = into_contiguous(state.log_scales);
-        let quats = into_contiguous(state.quats);
-        let raw_opac = into_contiguous(state.raw_opac);
-
-        // We're in charge of these, SHOULD be contiguous but might as well.
-        let projected_splats = into_contiguous(state.projected_splats);
-        let uniforms_buffer = into_contiguous(state.uniforms_buffer);
-        let compact_gid_from_isect = into_contiguous(state.compact_gid_from_isect);
-        let global_from_compact_gid = into_contiguous(state.global_from_compact_gid);
-        let tile_offsets = into_contiguous(state.tile_offsets);
-
-        let device = &state.out_img.device;
-        let img_dimgs = state.out_img.shape.dims;
-        let img_size = glam::uvec2(img_dimgs[1] as u32, img_dimgs[0] as u32);
-
-        let num_points = means.shape.dims[0];
-
-        let client = &means.client;
-
-        // Setup tensors.
-        // Nb: these are packed vec3 values, special care is taken in the kernel to respect alignment.
-        let v_means = Self::float_zeros([num_points, 3].into(), device, FloatDType::F32);
-
-        let v_scales = Self::float_zeros([num_points, 3].into(), device, FloatDType::F32);
-        let v_quats = Self::float_zeros([num_points, 4].into(), device, FloatDType::F32);
-        let v_coeffs = Self::float_zeros(
-            [
-                num_points,
-                sh_coeffs_for_degree(state.sh_degree) as usize,
-                3,
-            ]
-            .into(),
-            device,
-            FloatDType::F32,
-        );
-        let v_raw_opac = Self::float_zeros([num_points].into(), device, FloatDType::F32);
-        let v_grads = Self::float_zeros([num_points, 8].into(), device, FloatDType::F32);
-        let v_refine_weight = Self::float_zeros([num_points].into(), device, FloatDType::F32);
+        // Sparse [num_visible, 10] indexed by compact_gid.
+        let v_combined = Self::float_zeros([num_visible, 10].into(), &device, FloatDType::F32);
 
         let tile_bounds = uvec2(
             img_size
@@ -103,72 +50,124 @@ impl SplatBackwardOps<Self> for MainBackendBase {
 
         let hard_floats = client
             .properties()
-            .type_usage(StorageType::Atomic(ElemType::Float(FloatKind::F32)))
-            .contains(TypeUsage::AtomicAdd);
+            .atomic_type_usage(Type::atomic(Type::scalar(ElemType::Float(FloatKind::F32))))
+            .contains(AtomicUsage::Add);
 
-        let webgpu = cfg!(target_family = "wasm");
-        let mip_splat = matches!(state.render_mode, SplatRenderMode::Mip);
+        let cube_count = CubeCount::Static(tile_bounds.x, tile_bounds.y, 1);
+        let cube_dim = CubeDim::new_1d(kernels::rasterize_backwards::SPLAT_BATCH);
+        let uniforms = RasterizeUniformsLaunch::new(
+            tile_bounds.x,
+            img_size.x,
+            img_size.y,
+            background.x,
+            background.y,
+            background.z,
+        );
 
-        // Use checked execution, as the atomic loops are potentially unbounded.
         tracing::trace_span!("RasterizeBackwards").in_scope(|| {
-            // SAFETY: Kernel checked to have no OOB, bounded loops.
-            unsafe {
-                client
-                    .launch_unchecked(
-                        RasterizeBackwards::task(hard_floats, webgpu),
-                        CubeCount::Static(tile_bounds.x * tile_bounds.y, 1, 1),
-                        Bindings::new().with_buffers(vec![
-                            uniforms_buffer.handle.clone().binding(),
-                            compact_gid_from_isect.handle.binding(),
-                            global_from_compact_gid.handle.clone().binding(),
-                            tile_offsets.handle.binding(),
-                            projected_splats.handle.binding(),
-                            state.out_img.handle.binding(),
-                            v_output.handle.binding(),
-                            v_grads.handle.clone().binding(),
-                            v_raw_opac.handle.clone().binding(),
-                            v_refine_weight.handle.clone().binding(),
-                        ]),
-                    )
-                    .expect("Failed to bwd-diff splats");
+            use kernels::rasterize_backwards::{
+                CasAtomicAdd, HfAtomicAdd, rasterize_backwards_kernel,
+            };
+            if hard_floats {
+                rasterize_backwards_kernel::launch::<HfAtomicAdd, WgpuRuntime>(
+                    &client,
+                    cube_count,
+                    cube_dim,
+                    compact_gid_from_isect.into_tensor_arg(),
+                    tile_offsets.into_tensor_arg(),
+                    projected_splats.into_tensor_arg(),
+                    out_img.into_tensor_arg(),
+                    v_output.into_tensor_arg(),
+                    v_combined.clone().into_tensor_arg(),
+                    uniforms,
+                    smooth_cutoff,
+                );
+            } else {
+                rasterize_backwards_kernel::launch::<CasAtomicAdd, WgpuRuntime>(
+                    &client,
+                    cube_count,
+                    cube_dim,
+                    compact_gid_from_isect.into_tensor_arg(),
+                    tile_offsets.into_tensor_arg(),
+                    projected_splats.into_tensor_arg(),
+                    out_img.into_tensor_arg(),
+                    v_output.into_tensor_arg(),
+                    v_combined.clone().into_tensor_arg(),
+                    uniforms,
+                    smooth_cutoff,
+                );
             }
         });
 
-        tracing::trace_span!("ProjectBackwards").in_scope(||
-        // SAFETY: Kernel has to contain no OOB indexing, bounded loops.
-        unsafe {
-        client.launch_unchecked(
-            ProjectBackwards::task(mip_splat),
-            calc_cube_count_1d(num_points as u32, ProjectBackwards::WORKGROUP_SIZE[0]),
-            Bindings::new().with_buffers(
-            vec![
-                uniforms_buffer.handle.binding(),
-                means.handle.binding(),
-                log_scales.handle.binding(),
-                quats.handle.binding(),
-                raw_opac.handle.binding(),
-                global_from_compact_gid.handle.binding(),
-                v_grads.handle.binding(),
-                v_means.handle.clone().binding(),
-                v_scales.handle.clone().binding(),
-                v_quats.handle.clone().binding(),
-                v_coeffs.handle.clone().binding(),
-                v_raw_opac.handle.clone().binding(),
-            ]),
-        ).expect("Failed to bwd-diff splats");
-    });
+        RasterizeGrads { v_combined }
+    }
 
-        assert!(v_means.is_contiguous(), "Grads must be contiguous");
-        assert!(v_quats.is_contiguous(), "Grads must be contiguous");
-        assert!(v_scales.is_contiguous(), "Grads must be contiguous");
-        assert!(v_coeffs.is_contiguous(), "Grads must be contiguous");
-        assert!(v_raw_opac.is_contiguous(), "Grads must be contiguous");
-        assert!(v_refine_weight.is_contiguous(), "Grads must be contiguous");
+    #[allow(clippy::too_many_arguments)]
+    fn project_bwd(
+        transforms: FloatTensor<Self>,
+        sh_coeffs: FloatTensor<Self>,
+        raw_opac: FloatTensor<Self>,
+        global_from_compact_gid: IntTensor<Self>,
+        project_uniforms: ProjectUniforms,
+        render_mode: SplatRenderMode,
+        v_combined: FloatTensor<Self>,
+    ) -> SplatGrads<Self> {
+        let _span = tracing::trace_span!("project_bwd").entered();
+
+        // The screen-area regulariser only acts in this backward kernel, so we
+        // stamp the weight onto the uniforms here rather than in the forward.
+        let transforms = into_contiguous(transforms);
+        let sh_coeffs = into_contiguous(sh_coeffs);
+        let raw_opac = into_contiguous(raw_opac);
+
+        let device = transforms.device.clone();
+        let num_points = transforms.shape()[0];
+        let client = transforms.client.clone();
+
+        // Dense outputs, the kernel scatters compact→global internally.
+        let v_transforms = Self::float_zeros([num_points, 10].into(), &device, FloatDType::F32);
+        let v_coeffs = Self::float_zeros(
+            [
+                num_points,
+                sh_coeffs_for_degree(project_uniforms.sh_degree) as usize,
+                3,
+            ]
+            .into(),
+            &device,
+            FloatDType::F32,
+        );
+        let v_raw_opac = Self::float_zeros([num_points].into(), &device, FloatDType::F32);
+        let v_refine_weight = Self::float_zeros([num_points].into(), &device, FloatDType::F32);
+
+        let mip_splat = matches!(render_mode, SplatRenderMode::Mip);
+
+        let num_visible = project_uniforms.num_visible;
+
+        let uniforms = project_uniforms.to_launch_object();
+
+        tracing::trace_span!("ProjectBackwards").in_scope(|| {
+            kernels::project_backwards::project_backwards_kernel::launch::<WgpuRuntime>(
+                &client,
+                calc_cube_count_1d(num_visible, kernels::project_backwards::WG_SIZE),
+                CubeDim::new_1d(kernels::project_backwards::WG_SIZE),
+                transforms.into_tensor_arg(),
+                sh_coeffs.into_tensor_arg(),
+                raw_opac.into_tensor_arg(),
+                global_from_compact_gid.into_tensor_arg(),
+                v_combined.into_tensor_arg(),
+                v_transforms.clone().into_tensor_arg(),
+                v_coeffs.clone().into_tensor_arg(),
+                v_raw_opac.clone().into_tensor_arg(),
+                v_refine_weight.clone().into_tensor_arg(),
+                uniforms,
+                mip_splat,
+                project_uniforms.sh_degree,
+                project_uniforms.camera_model,
+            );
+        });
 
         SplatGrads {
-            v_means,
-            v_quats,
-            v_scales,
+            v_transforms,
             v_coeffs,
             v_raw_opac,
             v_refine_weight,

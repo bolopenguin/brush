@@ -9,16 +9,15 @@ license.workspace = true
 debug-validation = ["brush-render/debug-validation"]
 
 [dependencies]
-brush-kernel.path = "../brush-kernel"
+brush-cube.path = "../brush-cube"
 brush-render = { path = "../brush-render" }
-brush-wgsl.path = "../brush-wgsl"
-bytemuck = { workspace = true, features = ["derive"] }
 
 burn = { workspace = true, features = [
     'wgpu',
     'autodiff',
 ] }
 burn-cubecl.workspace = true
+burn-wgpu.workspace = true
 burn-fusion.workspace = true
 burn-ir.workspace = true
 
@@ -27,12 +26,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 # Enable debug-validation feature when running tests
-assert_approx_eq.workspace = true
 brush-render = { path = "../brush-render", features = ["debug-validation"] }
-burn-wgpu.workspace = true
-
-[package.metadata.cargo-shear]
-ignored = ["bytemuck"]
 
 [lints]
 workspace = true

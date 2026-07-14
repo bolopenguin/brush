@@ -3,10 +3,8 @@ use std::path::PathBuf;
 use brush_vfs::DataSource;
 use glam::Vec3;
 
-#[cfg(feature = "training")]
 use crate::config::TrainStreamConfig;
 
-#[cfg(feature = "training")]
 pub enum TrainMessage {
     /// Training configuration - sent at the start of training.
     TrainConfig {
@@ -20,8 +18,9 @@ pub enum TrainMessage {
     #[allow(unused)]
     TrainStep {
         iter: u32,
-        total_steps: u32,
         total_elapsed: web_time::Duration,
+        /// If in LOD phase: `(current_lod_1_based, total_lod_levels)`.
+        lod_progress: Option<(u32, u32)>,
     },
     /// Some number of training steps are done.
     #[allow(unused)]
@@ -56,10 +55,11 @@ pub enum ProcessMessage {
         frame: u32,
         total_frames: u32,
     },
-    #[cfg(feature = "training")]
     TrainMessage(TrainMessage),
     /// Some warning occurred during the process, but the process can continue.
-    Warning { error: anyhow::Error },
+    Warning {
+        error: anyhow::Error,
+    },
     /// Splat, or dataset and initial splat, are done loading.
     #[allow(unused)]
     DoneLoading,

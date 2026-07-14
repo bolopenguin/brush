@@ -7,13 +7,9 @@ use burn::nn::pool::MaxPool2d;
 use burn::nn::pool::MaxPool2dConfig;
 use burn::tensor::Device;
 use burn::tensor::activation::relu;
-use burn::{
-    config::Config,
-    module::Module,
-    tensor::{Tensor, backend::Backend},
-};
+use burn::{config::Config, module::Module, tensor::Tensor};
 
-/// [Residual layer block](LayerBlock) configuration.
+/// Residual layer block configuration.
 #[derive(Config, Debug)]
 struct VggBlockConfig {
     num_blocks: usize,
@@ -22,8 +18,8 @@ struct VggBlockConfig {
 }
 
 impl VggBlockConfig {
-    /// Initialize a new [LayerBlock](LayerBlock) module.
-    fn init<B: Backend>(&self, device: &Device<B>) -> VggBlock<B> {
+    /// Initialize a new `LayerBlock` module.
+    fn init(&self, device: &Device) -> VggBlock {
         let convs = (0..self.num_blocks)
             .map(|b| {
                 let in_channels = if b == 0 {
@@ -35,7 +31,7 @@ impl VggBlockConfig {
                 // conv3x3
                 let conv = Conv2dConfig::new([in_channels, self.out_channels], [3, 3])
                     .with_stride([1, 1])
-                    .with_padding(PaddingConfig2d::Explicit(1, 1))
+                    .with_padding(PaddingConfig2d::Explicit(1, 1, 1, 1))
                     .with_bias(true);
                 conv.init(device)
             })
@@ -46,12 +42,12 @@ impl VggBlockConfig {
 }
 
 #[derive(Module, Debug)]
-struct VggBlock<B: Backend> {
-    convs: Vec<Conv2d<B>>,
+struct VggBlock {
+    convs: Vec<Conv2d>,
 }
 
-impl<B: Backend> VggBlock<B> {
-    pub(crate) fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
+impl VggBlock {
+    pub(crate) fn forward(&self, input: Tensor<4>) -> Tensor<4> {
         let mut cur = input;
         for conv in &self.convs {
             cur = relu(conv.forward(cur));
@@ -61,20 +57,20 @@ impl<B: Backend> VggBlock<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct LpipsModel<B: Backend> {
-    blocks: Vec<VggBlock<B>>,
-    heads: Vec<Conv2d<B>>,
+pub struct LpipsModel {
+    blocks: Vec<VggBlock>,
+    heads: Vec<Conv2d>,
     max_pool: MaxPool2d,
 }
 
-fn norm_vec<B: Backend>(vec: Tensor<B, 4>) -> Tensor<B, 4> {
+fn norm_vec(vec: Tensor<4>) -> Tensor<4> {
     let norm_factor = vec.clone().powi_scalar(2).sum_dim(1).sqrt();
     vec / (norm_factor + 1e-10)
 }
 
-impl<B: Backend> LpipsModel<B> {
+impl LpipsModel {
     /// Calculate the lpips. Imgs are in NCHW order. Inputs should be 0-1 normalised.
-    pub fn lpips(&self, imgs_a: Tensor<B, 4>, imgs_b: Tensor<B, 4>) -> Tensor<B, 1> {
+    pub fn lpips(&self, imgs_a: Tensor<4>, imgs_b: Tensor<4>) -> Tensor<1> {
         let device = imgs_a.device();
 
         // Convert NHWC to NCHW and to [-1, 1].
@@ -82,14 +78,13 @@ impl<B: Backend> LpipsModel<B> {
         let imgs_b = imgs_b.permute([0, 3, 1, 2]) * 2.0 - 1.0;
 
         let shift =
-            Tensor::<B, 1>::from_floats([-0.030, -0.088, -0.188], &device).reshape([1, 3, 1, 1]);
-        let scale =
-            Tensor::<B, 1>::from_floats([0.458, 0.448, 0.450], &device).reshape([1, 3, 1, 1]);
+            Tensor::<1>::from_floats([-0.030, -0.088, -0.188], &device).reshape([1, 3, 1, 1]);
+        let scale = Tensor::<1>::from_floats([0.458, 0.448, 0.450], &device).reshape([1, 3, 1, 1]);
 
         let mut imgs_a = (imgs_a - shift.clone()) / scale.clone();
         let mut imgs_b = (imgs_b - shift) / scale;
 
-        let mut loss = Tensor::<B, 1>::zeros([1], &device);
+        let mut loss = Tensor::<1>::zeros([1], &device);
         for (i, (block, head)) in self.blocks.iter().zip(&self.heads).enumerate() {
             // TODO: concatenating first might be faster.
             if i != 0 {
@@ -113,8 +108,8 @@ impl<B: Backend> LpipsModel<B> {
     }
 }
 
-impl<B: Backend> LpipsModel<B> {
-    pub fn new(device: &B::Device) -> Self {
+impl LpipsModel {
+    pub fn new(device: &Device) -> Self {
         // Could have different variations here but just doing VGG for now.
         let blocks = [
             (2, 3, 64),
@@ -147,55 +142,74 @@ impl<B: Backend> LpipsModel<B> {
     }
 }
 
-// #[cfg(not(target_family = "wasm"))]
-// pub fn load_vgg_lpips<B: Backend>(device: &B::Device) -> LpipsModel<B> {
-//     use burn::record::BinBytesRecorder;
+pub fn load_vgg_lpips(device: &Device) -> LpipsModel {
+    use burn::record::{BinBytesRecorder, HalfPrecisionSettings, Recorder};
+    let model = LpipsModel::new(device);
 
-//     let model = LpipsModel::<B>::new(device);
+    #[allow(clippy::large_include_file)]
+    let bytes = include_bytes!("../burn_mapped.bin");
 
-//     #[allow(clippy::large_include_file)]
-//     //let bytes = include_bytes!("../burn_mapped.bin");
-//     let bytes = &[];
+    model.load_record(
+        BinBytesRecorder::<HalfPrecisionSettings, &[u8]>::default()
+            .load(bytes, device)
+            .expect("Should decode state successfully"),
+    )
+}
 
-//     model.load_record(
-//         BinBytesRecorder::<HalfPrecisionSettings, &[u8]>::default()
-//             .load(bytes, device)
-//             .expect("Should decode state successfully"),
-//     )
-// }
+#[cfg(test)]
+mod tests {
+    use super::load_vgg_lpips;
+    use burn::tensor::{Device, Tensor, TensorData};
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-// #[cfg(test)]
-// mod tests {
-//     use super::load_vgg_lpips;
-//     use burn::backend::Wgpu;
-//     use burn::backend::wgpu::WgpuDevice;
-//     use burn::tensor::TensorData;
-//     use burn::tensor::{Tensor, backend::Backend};
-//     use image::ImageReader;
+    #[cfg(target_family = "wasm")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
-//     fn image_to_tensor<B: Backend>(device: &B::Device, img: &image::DynamicImage) -> Tensor<B, 4> {
-//         let rgb_img = img.to_rgb32f();
-//         let (w, h) = rgb_img.dimensions();
-//         let data = TensorData::new(rgb_img.into_vec(), [1, h as usize, w as usize, 3]);
-//         Tensor::from_data(data, device)
-//     }
+    static APPLE_PNG: &[u8] = include_bytes!("../apple.png");
+    static PEAR_PNG: &[u8] = include_bytes!("../pear.png");
 
-//     #[test]
-//     fn test_result() -> Result<(), Box<dyn std::error::Error>> {
-//         let device = WgpuDevice::default();
+    fn image_to_tensor(device: &Device, img: &image::DynamicImage) -> Tensor<4> {
+        let rgb_img = img.to_rgb32f();
+        let (w, h) = rgb_img.dimensions();
+        let data = TensorData::new(rgb_img.into_vec(), [1, h as usize, w as usize, 3]);
+        Tensor::from_data(data, device)
+    }
 
-//         // Load and preprocess the images
-//         let image1 = ImageReader::open("./apple.png")?.decode()?;
-//         let image2 = ImageReader::open("./pear.png")?.decode()?;
+    async fn read_scalar(t: Tensor<1>) -> f32 {
+        t.into_scalar_async::<f32>().await.expect("readback")
+    }
 
-//         let apple = image_to_tensor::<Wgpu>(&device, &image1);
-//         let pear = image_to_tensor::<Wgpu>(&device, &image2);
+    #[wasm_bindgen_test(unsupported = tokio::test)]
+    async fn test_structural_properties() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let image1 = image::load_from_memory(APPLE_PNG).expect("Failed to load apple.png");
+        let image2 = image::load_from_memory(PEAR_PNG).expect("Failed to load pear.png");
+        let apple = image_to_tensor(&device, &image1);
+        let pear = image_to_tensor(&device, &image2);
+        let model = load_vgg_lpips(&device);
 
-//         let model = load_vgg_lpips(&device);
+        // Identity: LPIPS(x, x) == 0.
+        let identity = read_scalar(model.lpips(apple.clone(), apple.clone())).await;
+        assert!(identity.abs() < 1e-5, "LPIPS(apple, apple) = {identity}");
 
-//         // Calculate LPIPS similarity score between the two images
-//         let similarity_score = model.lpips(apple, pear).into_scalar();
-//         assert!((similarity_score - 0.65710217).abs() < 1e-4);
-//         Ok(())
-//     }
-// }
+        // Symmetry: LPIPS(a, b) == LPIPS(b, a).
+        let ab = read_scalar(model.lpips(apple.clone(), pear.clone())).await;
+        let ba = read_scalar(model.lpips(pear, apple)).await;
+        assert!((ab - ba).abs() < 1e-5, "asymmetric: ab = {ab}, ba = {ba}");
+    }
+
+    #[wasm_bindgen_test(unsupported = tokio::test)]
+    async fn test_matches_pytorch_reference() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let image1 = image::load_from_memory(APPLE_PNG).expect("Failed to load apple.png");
+        let image2 = image::load_from_memory(PEAR_PNG).expect("Failed to load pear.png");
+        let apple = image_to_tensor(&device, &image1);
+        let pear = image_to_tensor(&device, &image2);
+        let model = load_vgg_lpips(&device);
+        let score = read_scalar(model.lpips(apple, pear)).await;
+        assert!(
+            (score - 0.657_102).abs() < 1e-4,
+            "LPIPS(apple, pear) = {score}, PyTorch reference 0.6571019887924194",
+        );
+    }
+}

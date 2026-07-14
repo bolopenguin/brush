@@ -19,6 +19,9 @@ targets = [
     { triple = "aarch64-linux-android" },
 ]
 all-features = true
+# One-off LPIPS weight-conversion tool - don't really mind deps of it and
+# it pulls in a ton of stuff through the pytorch feature.
+exclude = ["lpips-convert"]
 
 [advisories]
 version = 2
@@ -27,6 +30,8 @@ ignore = [
     "RUSTSEC-2024-0436",
     # bincode is unmaintained, used by Cube and rerun, wait for them to upgrade.
     "RUSTSEC-2025-0141",
+    # ttf-parser is unmaintained, used transitively by winit.
+    "RUSTSEC-2026-0192",
 ]
 
 [bans]
@@ -41,7 +46,15 @@ skip = [
     { name = "bitflags" },
     { name = 'itertools' },
     { name = 'getrandom' },
-    { name = 'syn' },
+    { name = 'rand' },
+    { name = 'rand_core' },
+    { name = 'env_filter' },
+
+    { name = 'darling_macro' },
+    { name = 'darling' },
+    { name = 'darling_core' },
+
+    { name = 'cpufeatures' },
 
     { name = 'thiserror' },
     { name = 'thiserror-impl' },
@@ -53,12 +66,6 @@ skip = [
     { name = 'windows-targets' },     # Old version from winit.
     { name = 'windows-sys' },         # Old version from winit.
 
-    { name = 'windows-core' },      # Wgpu & rerun
-    { name = 'windows-strings' },   # Wgpu & rerun
-    { name = 'windows-result' },    # Wgpu & rerun
-    { name = 'windows-interface' }, # Wgpu & rerun
-    { name = 'windows-implement' }, # Wgpu & rerun
-
     { name = 'rustix' },        # Winit & clap
     { name = 'linux-raw-sys' }, # Winit & clap
 
@@ -66,28 +73,17 @@ skip = [
     { name = 'objc2' },            # eframe & rfd
     { name = 'objc2-app-kit' },    # eframe & rfd
     { name = 'objc2-foundation' }, # eframe & rfd
-    { name = 'windows' },          # Wgpu & kiddo
 
     { name = 'hashbrown' },
     { name = "rustc-hash" },
-    { name = "core-graphics-types" },
-
     { name = "smithay-client-toolkit" },
     { name = "foldhash" },
-
-    { name = "emath" },
     { name = "calloop-wayland-source" },
     { name = "calloop" },
-
-    { name = "zune-jpeg" },
-    { name = "zune-core" },
-    { name = "webpki-roots" },
-
     { name = "convert_case" },
-
-    # Older versions in rerun.
-    { name = "prettyplease" },
     { name = "console" },
+    { name = "jni-sys" },
+    { name = "wasm-streams" },
 ]
 
 [licenses]
@@ -108,7 +104,6 @@ allow = [
     "Unlicense",                      # https://www.tldrlegal.com/license/unlicense
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
-    "bzip2-1.0.6",
 ]
 
 [[licenses.clarify]]

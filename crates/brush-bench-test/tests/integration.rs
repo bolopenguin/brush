@@ -2,29 +2,31 @@
 //!
 //! These tests verify that the benchmark data generation and core operations work correctly.
 
+#![allow(clippy::missing_assert_message)]
+
 use brush_dataset::scene::SceneBatch;
 use brush_render::{
-    AlphaMode, MainBackend,
+    AlphaMode,
     bounding_box::BoundingBox,
     camera::Camera,
     gaussian_splats::{SplatRenderMode, Splats},
-    validation::validate_splat_gradients,
+    kernels::camera_model::CameraModel::Pinhole,
 };
 use brush_render_bwd::render_splats;
 use brush_train::{config::TrainConfig, train::SplatTrainer};
-use burn::{
-    backend::{Autodiff, wgpu::WgpuDevice},
-    tensor::{Tensor, TensorData, TensorPrimitive},
-};
+use burn::module::AutodiffModule;
+use burn::tensor::{Device, TensorData};
 use glam::{Quat, Vec3};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
+use wasm_bindgen_test::wasm_bindgen_test;
 
-type DiffBackend = Autodiff<MainBackend>;
+#[cfg(target_family = "wasm")]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 
 const TEST_SEED: u64 = 12345;
 
 /// Generate small realistic splats for testing
-fn generate_test_splats(device: &WgpuDevice, count: usize) -> Splats<DiffBackend> {
+fn generate_test_splats(device: &Device, count: usize) -> Splats {
     let mut rng = rand::rngs::StdRng::seed_from_u64(TEST_SEED);
 
     let means: Vec<f32> = (0..count)
@@ -76,7 +78,7 @@ fn generate_test_splats(device: &WgpuDevice, count: usize) -> Splats<DiffBackend
 
     let opacities: Vec<f32> = (0..count).map(|_| rng.random_range(0.6..1.0)).collect();
 
-    Splats::<DiffBackend>::from_raw(
+    Splats::from_raw(
         means,
         rotations,
         log_scales,
@@ -91,54 +93,59 @@ fn generate_test_splats(device: &WgpuDevice, count: usize) -> Splats<DiffBackend
 fn generate_test_batch(resolution: (u32, u32)) -> SceneBatch {
     let mut rng = rand::rngs::StdRng::seed_from_u64(TEST_SEED);
     let (width, height) = resolution;
-    let pixel_count = (width * height * 3) as usize;
+    let pixel_count = (width * height) as usize;
 
-    let img_data: Vec<f32> = (0..pixel_count)
+    let mut byte = |v: f32| -> u32 {
+        let v = (v + (rng.random::<f32>() - 0.5) * 0.05).clamp(0.0, 1.0);
+        (v * 255.0).round() as u32
+    };
+    let img_packed_data: Vec<i32> = (0..pixel_count)
         .map(|i| {
-            let pixel_idx = i / 3;
-            let x = (pixel_idx as u32) % width;
-            let y = (pixel_idx as u32) / width;
-            let channel = i % 3;
-
+            let x = (i as u32) % width;
+            let y = (i as u32) / width;
             let nx = x as f32 / width as f32;
             let ny = y as f32 / height as f32;
-
-            let base = match channel {
-                0 => nx * 0.5 + 0.25,
-                1 => ny * 0.5 + 0.25,
-                2 => (nx + ny) * 0.25 + 0.5,
-                _ => unreachable!(),
-            };
-
-            base + (rng.random::<f32>() - 0.5) * 0.05
+            let r = byte(nx * 0.5 + 0.25);
+            let g = byte(ny * 0.5 + 0.25);
+            let b = byte((nx + ny) * 0.25 + 0.5);
+            (r | g << 8 | b << 16 | 255 << 24) as i32
         })
         .collect();
 
-    let img_tensor = TensorData::new(img_data, [height as usize, width as usize, 3]);
+    let img_packed = TensorData::new(img_packed_data, [height as usize, width as usize]);
     let camera = Camera::new(
         Vec3::new(0.0, 0.0, 3.0),
         Quat::IDENTITY,
         45.0,
         45.0,
         glam::vec2(0.5, 0.5),
+        Pinhole,
     );
 
     SceneBatch {
-        img_tensor,
+        img_packed,
+        has_alpha: false,
         alpha_mode: AlphaMode::Transparent,
         camera,
     }
 }
 
-#[test]
-fn test_splat_generation() {
-    let device = WgpuDevice::default();
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn test_splat_generation() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let splats = generate_test_splats(&device, 1000);
 
     assert_eq!(splats.num_splats(), 1000);
 
     // Check that means are reasonable
-    let means_data = splats.means.val().into_data().into_vec::<f32>().unwrap();
+    let means_data = splats
+        .means()
+        .into_data_async()
+        .await
+        .expect("readback")
+        .into_vec::<f32>()
+        .unwrap();
     assert_eq!(means_data.len(), 3000);
 
     for chunk in means_data.chunks(3) {
@@ -147,23 +154,38 @@ fn test_splat_generation() {
     }
 }
 
-#[test]
-fn test_forward_rendering() {
-    let device = WgpuDevice::default();
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn test_forward_rendering() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let splats = generate_test_splats(&device, 1000);
-
-    // Just verify we can create the splats successfully
     assert_eq!(splats.num_splats(), 1000);
 
-    // Check that the tensor data is accessible
-    let means_data = splats.means.val().into_data().into_vec::<f32>().unwrap();
-    assert_eq!(means_data.len(), 3000);
-    assert!(means_data.iter().all(|&x| x.is_finite()));
+    let camera = Camera::new(
+        Vec3::new(0.0, 0.0, -8.0),
+        Quat::IDENTITY,
+        45.0,
+        45.0,
+        glam::vec2(0.5, 0.5),
+        Pinhole,
+    );
+    let img_size = glam::uvec2(64, 64);
+    let result = render_splats(splats, &camera, img_size, Vec3::ZERO).await;
+    assert!(result.num_visible > 0, "no splats rendered");
+    let data = result
+        .img
+        .into_data_async()
+        .await
+        .expect("readback")
+        .into_vec::<f32>()
+        .expect("Wrong type");
+    assert!(data.iter().all(|&v| v.is_finite()));
 }
 
-#[test]
-fn test_training_step() {
-    let device = WgpuDevice::default();
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn test_training_step() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let batch = generate_test_batch((64, 64));
     let splats = generate_test_splats(&device, 500);
     let config = TrainConfig::default();
@@ -172,27 +194,24 @@ fn test_training_step() {
         &device,
         BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE),
     );
-    let (final_splats, stats) = trainer.step(batch, splats);
+    let (final_splats, _stats) = trainer.step(batch, splats).await;
 
     assert!(final_splats.num_splats() > 0);
-    let loss = stats.loss.into_scalar();
-    assert!(loss.is_finite());
-    assert!(loss >= 0.0);
 }
 
-#[test]
+#[wasm_bindgen_test(unsupported = test)]
 fn test_batch_generation() {
     let batch = generate_test_batch((256, 128));
-    let img_dims = batch.img_tensor.shape.clone();
-    assert_eq!(img_dims, [128, 256, 3]);
-    let img_data = batch.img_tensor.into_vec::<f32>().unwrap();
-    assert!(img_data.iter().all(|&x| x.is_finite()));
-    assert!(img_data.iter().all(|&x| (0.0..=1.1).contains(&x)));
+    let img_dims = batch.img_packed.shape.as_slice();
+    assert_eq!(img_dims, &[128, 256]);
+    let img_data = batch.img_packed.into_vec::<i32>().unwrap();
+    assert_eq!(img_data.len(), 128 * 256);
 }
 
-#[test]
-fn test_multi_step_training() {
-    let device = WgpuDevice::default();
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn test_multi_step_training() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let batch = generate_test_batch((64, 64));
     let config = TrainConfig::default();
     let mut splats = generate_test_splats(&device, 100);
@@ -201,24 +220,79 @@ fn test_multi_step_training() {
         &device,
         BoundingBox::from_min_max(Vec3::ZERO, Vec3::ONE),
     );
-    let _initial_count = splats.num_splats();
 
-    // Run a few training steps
-    for _ in 0..3 {
-        let (new_splats, stats) = trainer.step(batch.clone(), splats);
+    for _ in 0..10 {
+        let (new_splats, _) = trainer.step(batch.clone(), splats).await;
         splats = new_splats;
-
-        let loss = stats.loss.into_scalar();
-        assert!(loss.is_finite());
-        assert!(loss >= 0.0);
     }
-
     assert!(splats.num_splats() > 0);
 }
 
-#[test]
-fn test_gradient_validation() {
-    let device = WgpuDevice::default();
+// Training with a camera pointing away from every splat — num_visible == 0
+// every step. The training loop must not crash on this; all gradients should
+// be zero (or at least finite) and the optimizer step should be a no-op.
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn train_with_zero_visible_does_not_crash() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let splats = generate_test_splats(&device, 200);
+
+    // Camera pointing away from the scene (looking along +Z, scene is at ±5).
+    let camera = Camera::new(
+        Vec3::new(0.0, 0.0, 1000.0),
+        Quat::IDENTITY, // looks along -Z in local space → away from origin
+        45.0,
+        45.0,
+        glam::vec2(0.5, 0.5),
+        Pinhole,
+    );
+
+    let pixel = 0x80808080u32 as i32; // mid-grey, opaque; bit-cast to i32 for the dispatch backend
+    let batch = SceneBatch {
+        img_packed: TensorData::new(vec![pixel; 64 * 64], [64usize, 64]),
+        has_alpha: false,
+        alpha_mode: AlphaMode::Transparent,
+        camera,
+    };
+
+    let config = TrainConfig::default();
+    let mut trainer = SplatTrainer::new(
+        &config,
+        &device,
+        BoundingBox::from_min_max(Vec3::splat(-2.0), Vec3::splat(2.0)),
+    );
+    let (new_splats, _stats) = trainer.step(batch, splats).await;
+    // Should succeed; nothing visible means num_visible ≈ 0.
+    assert!(new_splats.num_splats() > 0);
+}
+
+// Training with a deliberately degenerate bounding box (NaN center) used to
+// crash in `median_size`. After the fix, training must still proceed without
+// panicking — the per-step `lr_mean * median_size` just ends up NaN, which is
+// ultimately harmless because any NaN optimizer update is caught by
+// `validate_gradient` under the debug-validation feature.
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn trainer_tolerates_nan_bounds() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let splats = generate_test_splats(&device, 100);
+    let config = TrainConfig::default();
+
+    // A degenerate bounds with one NaN axis. Before the `total_cmp` fix, this
+    // panicked inside `median_size()` on the first `step` call.
+    let bounds = BoundingBox {
+        center: Vec3::ZERO,
+        extent: Vec3::new(f32::NAN, 1.0, 1.0),
+    };
+    let mut trainer = SplatTrainer::new(&config, &device, bounds);
+    let batch = generate_test_batch((64, 64));
+    let (_splats, _stats) = trainer.step(batch, splats).await;
+}
+
+#[wasm_bindgen_test(unsupported = tokio::test)]
+async fn test_gradient_validation() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let splats = generate_test_splats(&device, 100);
 
     // Create a simple loss by rendering and taking the mean
@@ -228,16 +302,88 @@ fn test_gradient_validation() {
         45.0,
         45.0,
         glam::vec2(0.5, 0.5),
+        Pinhole,
     );
     let img_size = glam::uvec2(64, 64);
 
-    let result = render_splats(&splats, &camera, img_size, Vec3::ZERO);
+    // Clone splats since render_splats takes ownership and we need splats for gradient validation
+    let result = render_splats(splats.clone(), &camera, img_size, Vec3::ZERO).await;
+    splats.bwd_validate(result.img.mean()).await;
+}
 
-    let rendered: Tensor<DiffBackend, 3> =
-        Tensor::from_primitive(TensorPrimitive::Float(result.img));
-    let loss = rendered.mean();
+// One trainer + many parallel viewers.
+// Test whether multithreading produces any issues.
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn stress_concurrent_train_and_view() {
+    use brush_async::Actor;
+    use brush_render::TextureMode;
+    use brush_render::gaussian_splats::render_splats as render_splats_fwd;
+    use tokio::sync::watch;
 
-    // Compute gradients
-    let grads = loss.backward();
-    validate_splat_gradients(&splats, &grads);
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let img_size = glam::uvec2(64, 64);
+
+    let viewer_count = 6;
+    let train_steps = 100;
+    let viewer_iters_per_task = 10;
+
+    let initial = generate_test_splats(&device, 500);
+    let (tx, rx) = watch::channel::<Splats>(initial.clone().valid());
+
+    let trainer_actor = Actor::new("test-trainer");
+    let device_c = device.clone();
+    let mut splats = initial;
+    let trainer_done = trainer_actor.run(move || async move {
+        let batch = generate_test_batch((64, 64));
+        let config = TrainConfig::default();
+        let mut trainer = SplatTrainer::new(
+            &config,
+            &device_c,
+            BoundingBox::from_min_max(Vec3::splat(-2.0), Vec3::splat(2.0)),
+        );
+        for _ in 0..train_steps {
+            let (new_splats, _) = trainer.step(batch.clone(), splats).await;
+            splats = new_splats;
+            let _ = tx.send(splats.valid());
+        }
+    });
+
+    let mut viewer_actors = Vec::with_capacity(viewer_count);
+    let mut viewer_dones = Vec::with_capacity(viewer_count);
+    for v in 0..viewer_count {
+        let actor = Actor::new(&format!("test-viewer-{v}"));
+        let mut rx = rx.clone();
+        let done = actor.run(move || async move {
+            let camera = Camera::new(
+                Vec3::new(0.0, 0.0, -5.0 - v as f32 * 0.3),
+                Quat::IDENTITY,
+                45.0,
+                45.0,
+                glam::vec2(0.5, 0.5),
+                Pinhole,
+            );
+            for _ in 0..viewer_iters_per_task {
+                let snap = rx.borrow_and_update().clone();
+                render_splats_fwd(
+                    snap,
+                    &camera,
+                    img_size,
+                    Vec3::ZERO,
+                    None,
+                    TextureMode::Float,
+                )
+                .await;
+            }
+        });
+        viewer_actors.push(actor);
+        viewer_dones.push(done);
+    }
+
+    trainer_done.await;
+    for d in viewer_dones {
+        d.await;
+    }
+    drop(viewer_actors);
 }

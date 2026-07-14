@@ -17,10 +17,13 @@ brush-train.path = "../brush-train"
 brush-dataset.path = "../brush-dataset"
 burn-cubecl.workspace = true
 
+tokio.workspace = true
+
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rerun.workspace = true
 glam.workspace = true
 image.workspace = true
+log.workspace = true
 
 [lints]
 workspace = true

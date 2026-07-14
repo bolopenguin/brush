@@ -2,12 +2,11 @@ use std::io::{self};
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncBufRead, AsyncRead};
-use tokio_with_wasm::alias as tokio_wasm;
 
 // TODO: Really these should each hold their respective params but bit of an annoying refactor. We just need
 // basic params.
 #[derive(Debug, Clone)]
-pub enum CameraModel {
+pub enum ColmapCameraModel {
     SimplePinhole,
     Pinhole,
     SimpleRadial,
@@ -21,7 +20,7 @@ pub enum CameraModel {
     ThinPrismFisheye,
 }
 
-impl CameraModel {
+impl ColmapCameraModel {
     fn from_id(id: i32) -> Option<Self> {
         match id {
             0 => Some(Self::SimplePinhole),
@@ -74,9 +73,9 @@ impl CameraModel {
 }
 
 #[derive(Debug, Clone)]
-pub struct Camera {
+pub struct ColmapCamera {
     pub id: i32,
-    pub model: CameraModel,
+    pub model: ColmapCameraModel,
     pub width: u64,
     pub height: u64,
     pub params: Vec<f64>,
@@ -114,102 +113,154 @@ pub struct Point3DAux {
     pub point2d_idxs: Vec<i32>,
 }
 
-impl Camera {
+impl ColmapCamera {
     pub fn focal(&self) -> (f64, f64) {
         let x = self.params[0];
         let y = self.params[match self.model {
-            CameraModel::SimplePinhole => 0,
-            CameraModel::Pinhole => 1,
-            CameraModel::SimpleRadial => 0,
-            CameraModel::Radial => 0,
-            CameraModel::OpenCV => 1,
-            CameraModel::OpenCvFishEye => 1,
-            CameraModel::FullOpenCV => 1,
-            CameraModel::Fov => 1,
-            CameraModel::SimpleRadialFisheye => 0,
-            CameraModel::RadialFisheye => 0,
-            CameraModel::ThinPrismFisheye => 1,
+            ColmapCameraModel::SimplePinhole => 0,
+            ColmapCameraModel::Pinhole => 1,
+            ColmapCameraModel::SimpleRadial => 0,
+            ColmapCameraModel::Radial => 0,
+            ColmapCameraModel::OpenCV => 1,
+            ColmapCameraModel::OpenCvFishEye => 1,
+            ColmapCameraModel::FullOpenCV => 1,
+            ColmapCameraModel::Fov => 1,
+            ColmapCameraModel::SimpleRadialFisheye => 0,
+            ColmapCameraModel::RadialFisheye => 0,
+            ColmapCameraModel::ThinPrismFisheye => 1,
         }];
         (x, y)
     }
 
     pub fn principal_point(&self) -> glam::Vec2 {
         let x = self.params[match self.model {
-            CameraModel::SimplePinhole => 1,
-            CameraModel::Pinhole => 2,
-            CameraModel::SimpleRadial => 1,
-            CameraModel::Radial => 1,
-            CameraModel::OpenCV => 2,
-            CameraModel::OpenCvFishEye => 2,
-            CameraModel::FullOpenCV => 2,
-            CameraModel::Fov => 2,
-            CameraModel::SimpleRadialFisheye => 1,
-            CameraModel::RadialFisheye => 1,
-            CameraModel::ThinPrismFisheye => 2,
+            ColmapCameraModel::SimplePinhole => 1,
+            ColmapCameraModel::Pinhole => 2,
+            ColmapCameraModel::SimpleRadial => 1,
+            ColmapCameraModel::Radial => 1,
+            ColmapCameraModel::OpenCV => 2,
+            ColmapCameraModel::OpenCvFishEye => 2,
+            ColmapCameraModel::FullOpenCV => 2,
+            ColmapCameraModel::Fov => 2,
+            ColmapCameraModel::SimpleRadialFisheye => 1,
+            ColmapCameraModel::RadialFisheye => 1,
+            ColmapCameraModel::ThinPrismFisheye => 2,
         }] as f32;
         let y = self.params[match self.model {
-            CameraModel::SimplePinhole => 2,
-            CameraModel::Pinhole => 3,
-            CameraModel::SimpleRadial => 2,
-            CameraModel::Radial => 2,
-            CameraModel::OpenCV => 3,
-            CameraModel::OpenCvFishEye => 3,
-            CameraModel::FullOpenCV => 3,
-            CameraModel::Fov => 3,
-            CameraModel::SimpleRadialFisheye => 2,
-            CameraModel::RadialFisheye => 2,
-            CameraModel::ThinPrismFisheye => 3,
+            ColmapCameraModel::SimplePinhole => 2,
+            ColmapCameraModel::Pinhole => 3,
+            ColmapCameraModel::SimpleRadial => 2,
+            ColmapCameraModel::Radial => 2,
+            ColmapCameraModel::OpenCV => 3,
+            ColmapCameraModel::OpenCvFishEye => 3,
+            ColmapCameraModel::FullOpenCV => 3,
+            ColmapCameraModel::Fov => 3,
+            ColmapCameraModel::SimpleRadialFisheye => 2,
+            ColmapCameraModel::RadialFisheye => 2,
+            ColmapCameraModel::ThinPrismFisheye => 3,
         }] as f32;
         glam::vec2(x, y)
     }
 }
 
-fn parse<T: std::str::FromStr>(s: &str) -> io::Result<T> {
-    s.parse()
-        .map_err(|_e| io::Error::new(io::ErrorKind::InvalidData, "Parse error"))
+fn parse<T: std::str::FromStr>(s: &str) -> io::Result<T>
+where
+    T::Err: std::fmt::Display,
+{
+    s.parse().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("could not parse {s:?}: {e}"),
+        )
+    })
 }
 
-async fn read_cameras_text<R: AsyncBufRead + Unpin>(mut reader: R) -> io::Result<Vec<Camera>> {
+/// Parse a float, tolerating MSVC-style NaN spellings like `-nan(ind)` /
+/// `nan(snan)` that some COLMAP exporters on Windows emit.
+fn parse_float(s: &str) -> io::Result<f64> {
+    if let Ok(v) = s.parse::<f64>() {
+        return Ok(v);
+    }
+    let lower = s.to_ascii_lowercase();
+    let body = lower.strip_prefix('-').unwrap_or(&lower);
+    if body.starts_with("nan") {
+        return Ok(f64::NAN);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("could not parse float {s:?}"),
+    ))
+}
+
+async fn read_cameras_text<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+) -> io::Result<Vec<ColmapCamera>> {
     let mut cameras = Vec::new();
     let mut line = String::new();
+    let mut line_no = 0usize;
 
     while reader.read_line(&mut line).await? > 0 {
+        line_no += 1;
         if line.starts_with('#') {
             line.clear();
             continue;
         }
 
         let parts: Vec<&str> = line.split_ascii_whitespace().collect();
+        if parts.is_empty() {
+            line.clear();
+            continue;
+        }
         if parts.len() < 4 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Invalid camera data",
+                format!(
+                    "cameras.txt line {line_no}: expected at least 4 fields (id, model, width, height), got {}",
+                    parts.len()
+                ),
             ));
         }
 
-        let id = parse(parts[0])?;
-        let model = CameraModel::from_name(parts[1])
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid camera model"))?;
+        let ctx =
+            |e: io::Error| io::Error::new(e.kind(), format!("cameras.txt line {line_no}: {e}"));
 
-        let width = parse(parts[2])?;
-        let height = parse(parts[3])?;
+        let id: i32 = parse(parts[0]).map_err(ctx)?;
+        let model = ColmapCameraModel::from_name(parts[1]).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cameras.txt line {line_no}: unknown camera model {:?}",
+                    parts[1]
+                ),
+            )
+        })?;
+
+        let width = parse(parts[2]).map_err(ctx)?;
+        let height = parse(parts[3]).map_err(ctx)?;
         let params: Vec<f64> = parts[4..]
             .iter()
-            .map(|&s| parse(s))
-            .collect::<Result<_, _>>()?;
+            .map(|&s| parse_float(s))
+            .collect::<Result<_, _>>()
+            .map_err(|e: io::Error| {
+                io::Error::new(
+                    e.kind(),
+                    format!("cameras.txt line {line_no} (camera id {id}): {e}"),
+                )
+            })?;
 
         if params.len() != model.num_params() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "Invalid number of camera parameters (was given {}, but expected {})",
+                    "cameras.txt line {line_no} (camera id {id}): got {} params, expected {} for model {:?}",
                     params.len(),
-                    model.num_params()
+                    model.num_params(),
+                    parts[1],
                 ),
             ));
         }
 
-        cameras.push(Camera {
+        cameras.push(ColmapCamera {
             id,
             model,
             width,
@@ -218,13 +269,13 @@ async fn read_cameras_text<R: AsyncBufRead + Unpin>(mut reader: R) -> io::Result
         });
         line.clear();
 
-        tokio_wasm::task::yield_now().await;
+        brush_async::yield_now().await;
     }
 
     Ok(cameras)
 }
 
-async fn read_cameras_binary<R: AsyncRead + Unpin>(mut reader: R) -> io::Result<Vec<Camera>> {
+async fn read_cameras_binary<R: AsyncRead + Unpin>(mut reader: R) -> io::Result<Vec<ColmapCamera>> {
     let mut cameras = Vec::new();
     let num_cameras = reader.read_u64_le().await?;
 
@@ -234,7 +285,7 @@ async fn read_cameras_binary<R: AsyncRead + Unpin>(mut reader: R) -> io::Result<
         let width = reader.read_u64_le().await?;
         let height = reader.read_u64_le().await?;
 
-        let model = CameraModel::from_id(model_id)
+        let model = ColmapCameraModel::from_id(model_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid camera model"))?;
 
         let num_params = model.num_params();
@@ -243,7 +294,7 @@ async fn read_cameras_binary<R: AsyncRead + Unpin>(mut reader: R) -> io::Result<
             params.push(reader.read_f64_le().await?);
         }
 
-        cameras.push(Camera {
+        cameras.push(ColmapCamera {
             id: camera_id,
             model,
             width,
@@ -362,6 +413,14 @@ async fn read_images_binary<R: AsyncBufRead + Unpin>(
         let mut name_bytes = Vec::new();
         reader.read_until(b'\0', &mut name_bytes).await?;
 
+        // `read_until` only stops short of the delimiter on EOF; a truncated
+        // file leaves us without the trailing '\0', so don't slice blindly.
+        if name_bytes.last() != Some(&b'\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "image name was not null-terminated (truncated images file?)",
+            ));
+        }
         let name = std::str::from_utf8(&name_bytes[..name_bytes.len() - 1])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
             .to_owned();
@@ -369,8 +428,10 @@ async fn read_images_binary<R: AsyncBufRead + Unpin>(
         let num_points2d = reader.read_u64_le().await?;
 
         let point_data = if with_points {
-            let mut xys = Vec::with_capacity(num_points2d as usize);
-            let mut point3d_ids = Vec::with_capacity(num_points2d as usize);
+            // `num_points2d` comes straight from the file; don't pre-allocate
+            // from it or a hostile/truncated file can trigger a huge alloc.
+            let mut xys = Vec::new();
+            let mut point3d_ids = Vec::new();
 
             for _ in 0..num_points2d {
                 xys.push(glam::Vec2::new(
@@ -506,8 +567,8 @@ async fn read_points3d_binary<R: AsyncRead + Unpin>(
         let track_length = reader.read_u64_le().await?;
 
         let points_aux = if points_aux {
-            let mut image_ids = Vec::with_capacity(track_length as usize);
-            let mut point2d_idxs = Vec::with_capacity(track_length as usize);
+            let mut image_ids = Vec::new();
+            let mut point2d_idxs = Vec::new();
 
             for _ in 0..track_length {
                 image_ids.push(reader.read_i32_le().await?);
@@ -541,7 +602,7 @@ async fn read_points3d_binary<R: AsyncRead + Unpin>(
 pub async fn read_cameras<R: AsyncBufRead + Unpin>(
     reader: R,
     binary: bool,
-) -> io::Result<Vec<Camera>> {
+) -> io::Result<Vec<ColmapCamera>> {
     if binary {
         read_cameras_binary(reader).await
     } else {
@@ -578,8 +639,9 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use tokio::io::BufReader;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    #[test]
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_camera_model_workflow() {
         // Test camera model parsing and parameter extraction
         let models = [
@@ -590,22 +652,22 @@ mod tests {
         ];
 
         for (id, name, expected_params) in models {
-            let from_id = CameraModel::from_id(id).unwrap();
-            let from_name = CameraModel::from_name(name).unwrap();
+            let from_id = ColmapCameraModel::from_id(id).unwrap();
+            let from_name = ColmapCameraModel::from_name(name).unwrap();
             assert_eq!(from_id.num_params(), expected_params);
             assert_eq!(from_name.num_params(), expected_params);
         }
 
         // Test invalid cases
-        assert!(CameraModel::from_id(99).is_none());
-        assert!(CameraModel::from_name("INVALID").is_none());
+        assert!(ColmapCameraModel::from_id(99).is_none());
+        assert!(ColmapCameraModel::from_name("INVALID").is_none());
     }
 
-    #[test]
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_camera_intrinsics() {
-        let pinhole_camera = Camera {
+        let pinhole_camera = ColmapCamera {
             id: 1,
-            model: CameraModel::Pinhole,
+            model: ColmapCameraModel::Pinhole,
             width: 640,
             height: 480,
             params: vec![500.0, 501.0, 320.0, 240.0],
@@ -616,9 +678,9 @@ mod tests {
         assert_eq!(pp.x, 320.0);
         assert_eq!(pp.y, 240.0);
 
-        let simple_camera = Camera {
+        let simple_camera = ColmapCamera {
             id: 2,
-            model: CameraModel::SimplePinhole,
+            model: ColmapCameraModel::SimplePinhole,
             width: 640,
             height: 480,
             params: vec![500.0, 320.0, 240.0],
@@ -626,7 +688,7 @@ mod tests {
         assert_eq!(simple_camera.focal(), (500.0, 500.0));
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_camera_parsing_workflow() {
         let camera_data = "# Camera list with one line of data per camera:\n\
                           # CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n\
@@ -644,7 +706,7 @@ mod tests {
 
         let cam2 = &cameras[1];
         assert_eq!(cam2.params.len(), 8);
-        assert!(matches!(cam2.model, CameraModel::OpenCV));
+        assert!(matches!(cam2.model, ColmapCameraModel::OpenCV));
 
         // Test error cases - should fail
         let invalid_model = "1 INVALID_MODEL 800 600 500.0 500.0 400.0 300.0\n";
@@ -658,7 +720,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_images_parsing_workflow() {
         let image_data = "# Image list with two lines of data per image:\n\
                          1 0.7071 0.0 0.0 0.7071 1.0 2.0 3.0 1 image1.jpg\n\
@@ -679,7 +741,7 @@ mod tests {
         assert_eq!(img2.points.as_ref().unwrap().xys.len(), 0); // No 2D points
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_images_missing_points_line() {
         // Some apps incorrectly skip the points line when there are 0 points.
         // This test verifies we handle that case correctly by detecting image
@@ -702,7 +764,7 @@ mod tests {
         assert_eq!(images[2].camera_id, 2);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_points3d_parsing_workflow() {
         let points_data = "# 3D point list\n\
                           1 1.5 2.5 3.5 255 128 64 0.1 1 100 2 200\n\
@@ -724,7 +786,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_error_handling_workflow() {
         // Test various malformed inputs - these should all fail
         let malformed_cases = [
@@ -749,7 +811,7 @@ mod tests {
         assert_eq!(cameras.len(), 0);
     }
 
-    #[tokio::test]
+    #[wasm_bindgen_test(unsupported = tokio::test)]
     async fn test_public_api_integration() {
         let camera_data = "1 PINHOLE 800 600 500.0 500.0 400.0 300.0\n";
         let reader = Cursor::new(camera_data.as_bytes());

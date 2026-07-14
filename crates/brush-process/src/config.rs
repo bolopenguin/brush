@@ -11,13 +11,23 @@ pub struct ProcessConfig {
     #[arg(long, help_heading = "Process options", default_value = "0")]
     pub start_iter: u32,
     /// Eval every this many steps.
-    #[arg(long, help_heading = "Process options", default_value = "1000")]
+    #[arg(
+        long,
+        help_heading = "Process options",
+        default_value = "1000",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     pub eval_every: u32,
     /// Save the rendered eval images to disk. Uses export-path for the file location.
     #[arg(long, help_heading = "Process options", default_value = "false")]
     pub eval_save_to_disk: bool,
     /// Export every this many steps.
-    #[arg(long, help_heading = "Process options", default_value = "5000")]
+    #[arg(
+        long,
+        help_heading = "Process options",
+        default_value = "5000",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     pub export_every: u32,
     /// Location to put exported files. By default uses the data directory if available,
     /// or the CWD otherwise. This can be set as a relative path.
@@ -34,7 +44,6 @@ pub struct ProcessConfig {
 
 #[derive(Parser, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[cfg(feature = "training")]
 pub struct TrainStreamConfig {
     #[clap(flatten)]
     #[serde(flatten)]
@@ -44,7 +53,7 @@ pub struct TrainStreamConfig {
     pub model_config: brush_dataset::config::ModelConfig,
     #[clap(flatten)]
     #[serde(flatten)]
-    pub load_config: brush_dataset::config::LoadDataseConfig,
+    pub load_config: brush_dataset::config::LoadDatasetConfig,
     #[clap(flatten)]
     #[serde(flatten)]
     pub process_config: ProcessConfig,
@@ -53,13 +62,8 @@ pub struct TrainStreamConfig {
     pub rerun_config: brush_rerun::RerunConfig,
 }
 
-#[cfg(feature = "training")]
 impl Default for TrainStreamConfig {
     fn default() -> Self {
         Self::parse_from([""])
     }
 }
-
-#[cfg(not(feature = "training"))]
-#[derive(Parser, Default, Clone)]
-pub struct TrainStreamConfig {}

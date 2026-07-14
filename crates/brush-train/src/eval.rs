@@ -2,77 +2,67 @@
 use std::path::Path;
 
 use anyhow::Result;
-use brush_dataset::scene::{sample_to_tensor_data, view_to_sample_image};
+use brush_dataset::scene::{sample_to_packed_data, view_to_sample_image};
+use brush_loss::{ImageLossConfig, image_loss_eval};
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
-use brush_render::render_aux::RenderAux;
-use brush_render::{AlphaMode, SplatForward};
-use burn::prelude::Backend;
-use burn::tensor::{Tensor, TensorPrimitive, s};
+use brush_render::{AlphaMode, RenderAux, TextureMode, render_splats};
+use burn::tensor::{Device, Int, Tensor, s};
 use glam::Vec3;
 use image::DynamicImage;
 
-use crate::ssim::Ssim;
-
-pub struct EvalSample<B: Backend> {
+pub struct EvalSample {
     pub gt_img: DynamicImage,
-    pub rendered: Tensor<B, 3>,
-    pub psnr: Tensor<B, 1>,
-    pub ssim: Tensor<B, 1>,
-    pub aux: RenderAux<B>,
+    pub rendered: Tensor<3>,
+    pub psnr: Tensor<1>,
+    pub ssim: Tensor<1>,
+    pub render_aux: RenderAux,
 }
 
-pub fn eval_stats<B: Backend + SplatForward<B>>(
-    splats: &Splats<B>,
+pub async fn eval_stats(
+    splats: Splats,
     gt_cam: &Camera,
     gt_img: DynamicImage,
     alpha_mode: AlphaMode,
-    device: &B::Device,
-) -> Result<EvalSample<B>> {
-    // Compare MSE in RGB only.
+    device: &Device,
+) -> Result<EvalSample> {
     let res = glam::uvec2(gt_img.width(), gt_img.height());
 
-    let gt_tensor = sample_to_tensor_data(view_to_sample_image(gt_img.clone(), alpha_mode));
-    let gt_tensor = Tensor::from_data(gt_tensor, device);
-    let gt_rgb = gt_tensor.slice(s![.., .., 0..3]);
+    let (gt_packed_data, _has_alpha) =
+        sample_to_packed_data(view_to_sample_image(gt_img.clone(), alpha_mode));
+    let gt_packed: Tensor<2, Int> = Tensor::from_data(gt_packed_data, device);
 
     // Render on reference black background.
-    let (img, aux) = {
-        let (img, aux) = B::render_splats(
-            gt_cam,
-            res,
-            splats.means.val().into_primitive().tensor(),
-            splats.log_scales.val().into_primitive().tensor(),
-            splats.rotations.val().into_primitive().tensor(),
-            splats.sh_coeffs.val().into_primitive().tensor(),
-            splats.raw_opacities.val().into_primitive().tensor(),
-            splats.render_mode,
-            Vec3::ZERO,
-            true,
-        );
-        (Tensor::from_primitive(TensorPrimitive::Float(img)), aux)
-    };
+    let (img, render_aux) =
+        render_splats(splats, gt_cam, res, Vec3::ZERO, None, TextureMode::Float).await;
     let render_rgb = img.slice(s![.., .., 0..3]);
 
     // Simulate an 8-bit roundtrip for fair comparison.
     let render_rgb = (render_rgb * 255.0).round() / 255.0;
 
-    let mse = (render_rgb.clone() - gt_rgb.clone()).powi_scalar(2).mean();
-
+    let cfg = |l1, ssim| ImageLossConfig {
+        l1_weight: l1,
+        ssim_weight: ssim,
+        composite_bg: None,
+        mask: false,
+    };
+    // MSE = mean(L1^2) since |a - b|^2 == (a - b)^2.
+    let mse = image_loss_eval(render_rgb.clone(), gt_packed.clone(), cfg(1.0, 0.0))
+        .powi_scalar(2)
+        .mean();
     let psnr = mse.recip().log() * 10.0 / std::f32::consts::LN_10;
-    let ssim_measure = Ssim::new(11, 3, device);
-    let ssim = ssim_measure.ssim(render_rgb.clone(), gt_rgb).mean();
+    let ssim = image_loss_eval(render_rgb.clone(), gt_packed, cfg(0.0, 1.0)).mean();
 
     Ok(EvalSample {
         gt_img,
         psnr,
         ssim,
         rendered: render_rgb,
-        aux,
+        render_aux,
     })
 }
 
-impl<B: Backend> EvalSample<B> {
+impl EvalSample {
     #[cfg(not(target_family = "wasm"))]
     pub async fn save_to_disk(&self, path: &Path) -> anyhow::Result<()> {
         use image::Rgb32FImage;

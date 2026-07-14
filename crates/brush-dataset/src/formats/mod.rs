@@ -1,12 +1,14 @@
-use crate::{Dataset, config::LoadDataseConfig};
+use crate::{Dataset, config::LoadDatasetConfig, scene::SceneView};
 use brush_serde::{DeserializeError, SplatMessage, load_splat_from_ply};
 
 use brush_vfs::BrushVfs;
 use image::ImageError;
+use itertools::{Either, Itertools};
 use std::{path::Path, sync::Arc};
 
 pub mod colmap;
 pub mod nerfstudio;
+pub mod realitycapture;
 
 use thiserror::Error;
 
@@ -18,10 +20,10 @@ pub struct DatasetLoadResult {
 
 #[derive(Error, Debug)]
 pub enum FormatError {
-    #[error("IO error while loading dataset.")]
+    #[error("I/O error while loading dataset: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Error decoding JSON file.")]
+    #[error("Error decoding JSON: {0}")]
     Json(#[from] serde_json::Error),
 
     #[error("Error decoding camera parameters: {0}")]
@@ -39,19 +41,21 @@ pub enum FormatError {
 
 #[derive(Debug, Error)]
 pub enum DatasetError {
-    #[error("Failed to load format.")]
+    #[error(transparent)]
     FormatError(#[from] FormatError),
 
-    #[error("Failed to load initial point cloud.")]
+    #[error("Failed to load initial point cloud: {0}")]
     InitialPointCloudError(#[from] DeserializeError),
 
-    #[error("Format not recognized: Only colmap and nerfstudio json are supported.")]
+    #[error(
+        "Format not recognized: only colmap, nerfstudio json and RealityCapture csv are supported"
+    )]
     FormatNotSupported,
 }
 
 pub async fn load_dataset(
     vfs: Arc<BrushVfs>,
-    load_args: &LoadDataseConfig,
+    load_args: &LoadDatasetConfig,
 ) -> Result<DatasetLoadResult, DatasetError> {
     let mut dataset = colmap::load_dataset(vfs.clone(), load_args).await;
 
@@ -59,11 +63,26 @@ pub async fn load_dataset(
         dataset = nerfstudio::read_dataset(vfs.clone(), load_args).await;
     }
 
+    if dataset.is_none() {
+        dataset = realitycapture::read_dataset(vfs.clone(), load_args).await;
+    }
+
     let Some(dataset) = dataset else {
         return Err(DatasetError::FormatNotSupported);
     };
 
     let result = dataset?;
+
+    // A dataset that parsed but has no usable training views (e.g. every image
+    // was missing or filtered out) would otherwise "load" and then crash on the
+    // first training batch. Reject it here with a typed error instead.
+    if result.dataset.train.views.is_empty() {
+        return Err(FormatError::InvalidFormat(
+            "dataset contains no usable training views (all images missing or filtered out)"
+                .to_owned(),
+        )
+        .into());
+    }
 
     // If there's an initial ply file, override the init stream with that.
     let mut ply_paths: Vec<_> = vfs.files_with_extension("ply").collect();
@@ -89,6 +108,42 @@ pub async fn load_dataset(
         init_splat,
         dataset: result.dataset,
         warnings: result.warnings,
+    })
+}
+
+/// Resolve a bare image name (as stored by colmap / `RealityCapture`, which only
+/// record a filename) to a path in the VFS by brute-force suffix search. Masks
+/// are skipped so an image never resolves to its own mask.
+fn find_image_by_name<'a>(vfs: &'a BrushVfs, name: &str) -> Option<&'a Path> {
+    vfs.files_ending_in(name)
+        .filter(|p| !p.iter().any(|f| f == "masks"))
+        .min()
+}
+
+/// Convert an OpenGL/Blender camera-to-world matrix (the nerfstudio
+/// `transform_matrix` convention: +X right, +Y up, +Z back) into brush's
+/// camera pose (+X right, +Y down, +Z forward).
+fn opengl_c2w_to_pose(mut c2w: glam::Mat4) -> (glam::Vec3, glam::Quat) {
+    c2w.y_axis *= -1.0;
+    c2w.z_axis *= -1.0;
+    let (_, rotation, translation) = c2w.to_scale_rotation_translation();
+    (translation, rotation)
+}
+
+/// Split views into (train, eval) by selecting every `eval_split_every`-th view
+/// for eval. With `None`, every view is a train view.
+fn split_eval_every(
+    views: Vec<SceneView>,
+    eval_split_every: Option<usize>,
+) -> (Vec<SceneView>, Vec<SceneView>) {
+    views.into_iter().enumerate().partition_map(|(i, v)| {
+        if let Some(split) = eval_split_every
+            && i % split == 0
+        {
+            Either::Right(v)
+        } else {
+            Either::Left(v)
+        }
     })
 }
 
@@ -137,8 +192,9 @@ fn find_mask_path<'a>(vfs: &'a BrushVfs, path: &'a Path) -> Option<&'a Path> {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+    use wasm_bindgen_test::wasm_bindgen_test;
 
-    #[test]
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_find_mask() {
         // Basic matching with same extension
         let vfs = BrushVfs::create_test_vfs(vec![
@@ -160,7 +216,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_find_mask_formats() {
         // Test img.png.mask format
         let vfs = BrushVfs::create_test_vfs(vec![
@@ -183,7 +239,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_find_nested_dirs() {
         // Nested directories must match
         let vfs = BrushVfs::create_test_vfs(vec![
@@ -202,7 +258,7 @@ mod tests {
         assert_eq!(find_mask_path(&vfs, Path::new("images/baz/img.png")), None);
     }
 
-    #[test]
+    #[wasm_bindgen_test(unsupported = test)]
     fn test_find_case_insensitive() {
         let vfs = BrushVfs::create_test_vfs(vec![
             PathBuf::from("images/IMG.PNG"),

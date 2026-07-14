@@ -14,6 +14,12 @@ pub enum DataSource {
     PickDirectory,
     Url(String),
     Path(String),
+    /// A directory handle the host has already obtained (e.g. via JS
+    /// `showDirectoryPicker`). Constructed programmatically — never
+    /// (de)serialised from CLI args or saved state.
+    #[cfg(target_family = "wasm")]
+    #[serde(skip)]
+    PickedDirectory(rrfd::wasm::DirectoryHandle, String),
 }
 
 // Implement FromStr to allow Clap to parse string arguments into DataSource
@@ -38,6 +44,8 @@ impl fmt::Display for DataSource {
             Self::PickDirectory => write!(f, "Directory"),
             Self::Url(_) => write!(f, "URL"),
             Self::Path(_) => write!(f, "Path"),
+            #[cfg(target_family = "wasm")]
+            Self::PickedDirectory(_, name) => write!(f, "{name}"),
         }
     }
 }
@@ -87,6 +95,10 @@ impl DataSource {
             #[cfg(target_family = "wasm")]
             Self::Path(_) => {
                 panic!("Cannot load from filesystem path on WASM");
+            }
+            #[cfg(target_family = "wasm")]
+            Self::PickedDirectory(handle, _) => {
+                Ok(Arc::new(BrushVfs::from_directory_handle(handle).await?))
             }
         }
     }
@@ -157,20 +169,19 @@ impl DataSource {
             opts.set_mode(RequestMode::Cors);
 
             let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| {
-                DataSourceError::FetchError(format!("Failed to create request: {:?}", e))
+                DataSourceError::FetchError(format!("Failed to create request: {e:?}"))
             })?;
 
-            let window = web_sys::window().ok_or_else(|| {
-                DataSourceError::FetchError("No window object available".to_string())
-            })?;
+            let window = web_sys::window()
+                .ok_or_else(|| DataSourceError::FetchError("No window object available".into()))?;
 
             let resp_value =
                 wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
                     .await
-                    .map_err(|e| DataSourceError::FetchError(format!("Fetch failed: {:?}", e)))?;
+                    .map_err(|e| DataSourceError::FetchError(format!("Fetch failed: {e:?}")))?;
 
             let resp: Response = resp_value.dyn_into().map_err(|e| {
-                DataSourceError::FetchError(format!("Failed to cast to Response: {:?}", e))
+                DataSourceError::FetchError(format!("Failed to cast to Response: {e:?}"))
             })?;
 
             if !resp.ok() {
@@ -202,7 +213,7 @@ impl DataSource {
 
             let body = resp
                 .body()
-                .ok_or_else(|| DataSourceError::FetchError("Response has no body".to_string()))?;
+                .ok_or_else(|| DataSourceError::FetchError("Response has no body".into()))?;
 
             let readable_stream = ReadableStream::from_raw(body);
             let async_read = readable_stream.into_async_read().compat();

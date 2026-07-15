@@ -1,0 +1,62 @@
+{
+  "type": "object",
+  "title": "make-twin-trantor-brush",
+  "description": "Make twin trantor with brush.",
+  "version": "0.0.0",
+  "properties": {
+    "inputs": {
+      "$ref": "#/$defs/Inputs"
+    },
+    "outputs": {
+      "$ref": "#/$defs/Outputs"
+    }
+  },
+  "required": [
+    "inputs",
+    "outputs"
+  ],
+  "hw_requirements": {
+    "cpu": 1,
+    "ram": 1,
+    "compute_gpu": 1
+  },
+  "$defs": {
+    "Inputs": {
+      "properties": {
+        "train_folder": {
+          "description": "",
+          "format": "directory-path",
+          "title": "Train Folder",
+          "type": "string"
+        },
+        "total_steps": {
+          "default": 30000,
+          "description": "",
+          "title": "Total Steps",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "train_folder"
+      ],
+      "title": "Inputs",
+      "type": "object"
+    },
+    "Outputs": {
+      "properties": {
+        "output_file": {
+          "description": "",
+          "extension": ".nt",
+          "format": "file-path",
+          "title": "Output File",
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_file"
+      ],
+      "title": "Outputs",
+      "type": "object"
+    }
+  }
+}

@@ -57,14 +57,13 @@ fn main() -> Result<(), anyhow::Error> {
             .join(format!("brush_{}", random_id))
             .to_string_lossy()
             .to_string();
-        // Use default keys for underfolder format
         let converted_path = convert_underfolder_to_nerf(
             &p,
             &out_path_str,
-            "rgb",        // default image key
-            "mask",       // default mask key
-            "camera",     // default camera key
-            "w2c",        // default w2c key
+            &args.train_stream.load_config.image_key,
+            &args.train_stream.load_config.mask_key,
+            &args.train_stream.load_config.camera_key,
+            &args.train_stream.load_config.w2c_key,
         );
         Some(PathBuf::from(converted_path))
     } else {

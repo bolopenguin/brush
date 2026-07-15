@@ -46,6 +46,18 @@ pub struct LoadDatasetConfig {
     /// Max size of the cache for frames of the dataset, larger values usually improve performance for large datasets at the cost of more memory usage, can be e.g. 6G, 6000M, 6000MiB, 6000MB
     #[arg(long, help_heading = "Dataset Options", default_value = DEFAULT_MAX_SCENE_BATCH_CACHE_SIZE, value_parser = parse_size)]
     pub max_scene_batch_cache_size: u64,
+    /// The Image key to use in the underfolder dataset.
+    #[arg(long, help_heading = "Dataset Options", default_value = "rgb")]
+    pub image_key: String,
+    /// The Mask key to use in the underfolder dataset.
+    #[arg(long, help_heading = "Dataset Options", default_value = "mask")]
+    pub mask_key: String,
+    /// The Camera key to use in the underfolder dataset.
+    #[arg(long, help_heading = "Dataset Options", default_value = "camera")]
+    pub camera_key: String,
+    /// The World-to-Camera key to use in the underfolder dataset.
+    #[arg(long, help_heading = "Dataset Options", default_value = "w2c")]
+    pub w2c_key: String,
 }
 
 fn parse_size(s: &str) -> Result<u64, parse_size::Error> {

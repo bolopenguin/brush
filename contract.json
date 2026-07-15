@@ -1,0 +1,9 @@
+{
+    "title": "brush:0.0.1",
+    "inputs": {
+        "train_folder": "/data/lego_uf_train_test"
+    },
+    "outputs": {
+        "output_file": "/data/lego_uf_train_test.nt"
+    }
+}

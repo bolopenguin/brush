@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub struct TrainConfig {
     /// Total number of steps to train for.
-    #[arg(long, help_heading = "Training options", default_value = "30000")]
+    #[arg(long, alias = "total-steps", help_heading = "Training options", default_value = "30000")]
     pub total_train_iters: u32,
 
     #[arg(long, help_heading = "Training options")]

@@ -102,12 +102,15 @@ fn main() -> Result<(), anyhow::Error> {
         .build()
         .expect("Failed to initialize tokio runtime")
         .block_on(async move {
-            let init_process = converted_source.as_ref().map(|source| {
+            // Use converted source if available, otherwise use original source
+            let effective_source = converted_source.or_else(|| args.get_source());
+            
+            let init_process = effective_source.map(|source| {
                 let cli_config = args.train_stream.clone();
-                brush_process::create_process(source.clone(), async move |init| {
+                brush_process::create_process(source, async move |init| {
                     Some(brush_process::args_file::merge_configs(&init, &cli_config))
                 })
-            }).or_else(|| brush_cli::build_process(&args));
+            });
 
             if args.with_viewer {
                 use crate::ui::app::App;

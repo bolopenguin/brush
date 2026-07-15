@@ -47,7 +47,7 @@ pub struct LoadDatasetConfig {
     #[arg(long, help_heading = "Dataset Options", default_value = DEFAULT_MAX_SCENE_BATCH_CACHE_SIZE, value_parser = parse_size)]
     pub max_scene_batch_cache_size: u64,
     /// The Image key to use in the underfolder dataset.
-    #[arg(long, help_heading = "Dataset Options", default_value = "rgb")]
+    #[arg(long, help_heading = "Dataset Options", default_value = "image")]
     pub image_key: String,
     /// The Mask key to use in the underfolder dataset.
     #[arg(long, help_heading = "Dataset Options", default_value = "mask")]

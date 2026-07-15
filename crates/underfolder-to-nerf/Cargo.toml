@@ -1,0 +1,24 @@
+[package]
+name = "underfolder-to-nerf"
+version = "0.1.0"
+edition = "2024"
+authors = ["bolopenguin"]
+description = "A tool to convert underfolder datasets to NERF format"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+colored = "3.0.0"
+walkdir = "2.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+nalgebra = "0.32"
+serde_json = "1.0"
+image = "0.25.9"
+rayon = "1.8"
+indicatif = { version = "0.17", features = ["rayon"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

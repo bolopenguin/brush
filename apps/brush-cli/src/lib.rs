@@ -25,14 +25,23 @@ use tracing::trace_span;
     about = "Brush - universal splats"
 )]
 pub struct Cli {
-    /// Source to load from (path or URL).
-    #[arg(value_name = "PATH_OR_URL")]
+    /// Source to load from (path or URL). Can also be specified with --train-folder.
+    #[arg(value_name = "PATH_OR_URL", conflicts_with = "train_folder")]
     pub source: Option<DataSource>,
+
+    /// Training folder or source to load from (path or URL).
+    #[arg(long = "train-folder", value_name = "PATH_OR_URL", conflicts_with = "source")]
+    pub train_folder: Option<DataSource>,
+
+    /// Output file path to save the trained Eyesplat Neural Twin (.nt) to.
+    #[arg(long = "output-file", value_name = "PATH")]
+    pub output_file: Option<String>,
 
     #[arg(
         long,
         default_value = "true",
         default_value_if("source", ArgPredicate::IsPresent, "false"),
+        default_value_if("train_folder", ArgPredicate::IsPresent, "false"),
         help = "Spawn a viewer to visualize the training"
     )]
     pub with_viewer: bool,
@@ -43,20 +52,25 @@ pub struct Cli {
 
 impl Cli {
     pub fn validate(self) -> Result<Self, Error> {
-        if !self.with_viewer && self.source.is_none() {
+        if !self.with_viewer && self.source.is_none() && self.train_folder.is_none() {
             return Err(Error::raw(
                 ErrorKind::MissingRequiredArgument,
-                "When --with-viewer is false, --source must be provided",
+                "When --with-viewer is false, --source or --train-folder must be provided",
             ));
         }
         Ok(self)
+    }
+
+    /// Get the effective source, preferring train_folder over source
+    pub fn get_source(&self) -> Option<DataSource> {
+        self.train_folder.clone().or_else(|| self.source.clone())
     }
 }
 
 /// Build the training process described by `args`, or `None` if no source was
 /// given. Shared by the standalone CLI binary and brush-app's headless path.
 pub fn build_process(args: &Cli) -> Option<RunningProcess> {
-    let source = args.source.clone()?;
+    let source = args.get_source()?;
     let cli_config = args.train_stream.clone();
     Some(create_process(source, async move |init| {
         Some(brush_process::args_file::merge_configs(&init, &cli_config))

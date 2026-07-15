@@ -64,6 +64,7 @@ image = { workspace = true }
 # On desktop platforms
 [target.'cfg(any(target_family = "unix", target_family = "windows"))'.dependencies]
 brush-cli.path = "../brush-cli"
+underfolder-to-nerf.path = "../../crates/underfolder-to-nerf"
 
 winit = { version = "0.30", features = ["default"] }
 clap.workspace = true

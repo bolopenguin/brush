@@ -24,6 +24,7 @@ members = [
     "crates/lpips",
     "crates/lpips-convert",
     "crates/rrfd",
+    "crates/underfolder-to-nerf",
 ]
 default-members = ["apps/brush-app"]
 

@@ -253,15 +253,19 @@ pub fn convert_underfolder_to_nerf(
     let mut image_files = find_files_with_sub_str(path_in, image_key).unwrap();
     image_files.sort();
     assert!(!image_files.is_empty(), "No image files found");
+    println!("Found {} image files", image_files.len().to_string().cyan().bold());
     let mut mask_files = find_files_with_sub_str(path_in, mask_key).unwrap();
     mask_files.sort();
     assert!(!mask_files.is_empty(), "No mask files found");
+    println!("Found {} mask files", mask_files.len().to_string().cyan().bold());
     let mut camera_files = find_files_with_sub_str(path_in, camera_key).unwrap();
     camera_files.sort();
     assert!(!camera_files.is_empty(), "No camera files found");
+    println!("Found {} camera file(s)", camera_files.len().to_string().cyan().bold());
     let mut w2c_files = find_files_with_sub_str(path_in, w2c_key).unwrap();
     w2c_files.sort();
     assert!(!w2c_files.is_empty(), "No w2c files found");
+    println!("Found {} w2c files", w2c_files.len().to_string().cyan().bold());
 
     assert!(image_files.len() == mask_files.len());
     assert!(image_files.len() == w2c_files.len());
@@ -384,5 +388,6 @@ pub fn convert_underfolder_to_nerf(
     .expect("Failed to write transforms.json");
 
     println!("Conversion result: {}", path_out.green().bold());
+    println!("✓ Successfully converted {} frames to NERF format at {}", frames.len().to_string().green().bold(), path_out.to_string().cyan().bold());
     path_out.to_string()
 }

@@ -161,6 +161,7 @@ pub(crate) async fn train_stream(
     let export_path: PathBuf = export_path.components().collect();
 
     log::info!("Start training loop.");
+    println!("\n🚀 Starting training with {} total steps", train_stream_config.train_config.total_steps);
     for iter in
         train_stream_config.process_config.start_iter..train_stream_config.train_config.total_steps
     {
@@ -206,6 +207,17 @@ pub(crate) async fn train_stream(
 
         // Add up time from this step.
         train_duration += step_time.elapsed();
+
+        // Log progress every 100 steps
+        if iter % 100 == 0 {
+            let progress_pct = (iter as f32 / train_stream_config.train_config.total_steps as f32) * 100.0;
+            println!("[Step {}/{}] Progress: {:.1}% | Time: {:.1}s", 
+                iter, 
+                train_stream_config.train_config.total_steps,
+                progress_pct,
+                train_duration.as_secs_f32()
+            );
+        }
 
         // Check if we want to evaluate _next iteration_. Small detail, but this ensures we evaluate
         // before doing a refine.
@@ -299,6 +311,7 @@ pub(crate) async fn train_stream(
         }
     }
 
+    println!("\n✅ Training complete! Total time: {:.1}s", train_duration.as_secs_f32());
     emitter
         .emit(ProcessMessage::TrainMessage(TrainMessage::DoneTraining))
         .await;

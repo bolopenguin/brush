@@ -158,7 +158,17 @@ fn main() -> Result<(), anyhow::Error> {
     // Convert the ply to an Eyesplat Neural Twin file if output_file was specified
     if let (Some(output_path), Some(ply_path)) = (output_file, temp_path_export_ply) {
         eprintln!("Converting PLY to Neural Twin format...");
-        let status = std::process::Command::new("python3")
+        eprintln!("  PLY: {:?}", ply_path);
+        eprintln!("  Output: {}", output_path);
+        
+        // Use Python from virtual environment if available, otherwise fall back to python3
+        let python_cmd = if std::path::Path::new("/home/dbolognini/dev/utils/venv/entb/bin/python").exists() {
+            "/home/dbolognini/dev/utils/venv/entb/bin/python"
+        } else {
+            "python3"
+        };
+        
+        let status = std::process::Command::new(python_cmd)
             .arg("python/decode_splat.py")
             .arg(&ply_path)
             .arg(&output_path)
@@ -167,7 +177,7 @@ fn main() -> Result<(), anyhow::Error> {
         if !status.success() {
             eprintln!("Warning: decode_splat.py failed with status: {}", status);
         } else {
-            eprintln!("Successfully saved to: {}", output_path);
+            eprintln!("✓ Successfully saved to: {}", output_path);
         }
     }
 

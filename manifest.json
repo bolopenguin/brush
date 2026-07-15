@@ -30,14 +30,14 @@
           "type": "string"
         },
         "total_steps": {
+          "default": 30000,
           "description": "",
           "title": "Total Steps",
           "type": "integer"
         }
       },
       "required": [
-        "train_folder",
-        "total_steps"
+        "train_folder"
       ],
       "title": "Inputs",
       "type": "object"
@@ -46,6 +46,7 @@
       "properties": {
         "output_file": {
           "description": "",
+          "extension": ".nt",
           "format": "file-path",
           "title": "Output File",
           "type": "string"

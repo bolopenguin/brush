@@ -1,7 +1,7 @@
 {
   "type": "object",
-  "title": "make-twin-trantor-rust",
-  "description": "Make twin trantor with Rust.",
+  "title": "make-twin-trantor-brush",
+  "description": "Make twin trantor with brush.",
   "version": "0.0.0",
   "properties": {
     "inputs": {

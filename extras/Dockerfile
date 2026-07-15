@@ -49,7 +49,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends --no-install-su
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install eyesplat from custom wheel server (optional - may not be available)
-RUN pip3 install --no-cache-dir --break-system-packages --upgrade --root-user-action=ignore -f http://wheels.eyecan.ai:8000 --trusted-host wheels.eyecan.ai eyesplat
+RUN pip3 install --no-cache-dir --break-system-packages --upgrade --root-user-action=ignore -f http://wheels.eyecan.ai:8000 --trusted-host wheels.eyecan.ai eyesplat>1.5.0
 
 # Copy the built Brush binary
 COPY --from=builder /brush/target/release/brush /usr/local/bin/brush
